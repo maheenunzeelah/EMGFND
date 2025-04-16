@@ -1,0 +1,40 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+*.env
+
+# Logs
+*.log
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+.virtual_documents/
+
+# Folders to ignore
+anaconda_projects/
+public_images/
+fnd/  # virtual environment folder
+
+# Files to ignore
+public_images.tar
+multimodal_test_public.tsv
+multimodal_trainc.tsv
+
+# Data files
+data/
+datasets/
+
+# IDE folders
+.vscode/
+.idea/
+
+# Node.js
+node_modules/
+
+# Ignore compiled files
+build/
+dist/
+*.out
