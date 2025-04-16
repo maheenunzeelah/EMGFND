@@ -16,12 +16,14 @@ __pycache__/
 # Folders to ignore
 anaconda_projects/
 public_images/
-fnd/  # virtual environment folder
+fnd/
 
 # Files to ignore
 public_images.tar
 multimodal_test_public.tsv
-multimodal_trainc.tsv
+multimodal_train.tsv
+public_images.tar.bz2
+multimodal_validate.tsv
 
 # Data files
 data/
