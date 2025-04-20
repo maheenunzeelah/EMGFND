@@ -17,13 +17,13 @@ __pycache__/
 anaconda_projects/
 public_images/
 fnd/
+allData_images/
 
 # Files to ignore
 public_images.tar
-multimodal_test_public.tsv
-multimodal_train.tsv
 public_images.tar.bz2
-multimodal_validate.tsv
+
+ 
 
 # Data files
 data/
