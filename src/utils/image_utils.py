@@ -3,6 +3,9 @@ from IPython.display import Markdown, display, update_display, Image
 import base64
 import requests
 import os
+import io
+from PIL import Image as PILImage
+
 
 def get_image_filename(url):
     # Use regular expression to find the part after '.com/' and before '.jpg'
@@ -42,3 +45,33 @@ def load_and_display_image(url, folder='allData_images'):
     else:
         print("Invalid URL format.")
     return None
+
+
+def get_pil_image(input_data):
+    """
+    If input_data is a base64 string (with or without data URI), decode and return Pillow Image.
+    If input_data is a valid image file path, open and return Pillow Image.
+    """
+    # Check if input_data looks like base64 (starts with 'data:image' or very long string without a file path)
+    if isinstance(input_data, str):
+        if input_data.startswith("data:image") or len(input_data) > 100:
+            # Likely base64 string
+            if input_data.startswith("data:image"):
+                input_data = input_data.split(",", 1)[1]
+            try:
+                image_data = base64.b64decode(input_data)
+                return PILImage.open(io.BytesIO(image_data))
+            except Exception as e:
+                print("Error decoding base64 image:", e)
+                raise
+        elif os.path.isfile(input_data):
+            # Treat as image file path
+            try:
+                return PILImage.open(input_data)
+            except Exception as e:
+                print("Error opening image file:", e)
+                raise
+        else:
+            raise ValueError("Input string is neither a valid file path nor a base64 image string.")
+    else:
+        raise TypeError("Input must be a base64 string or a file path string.")    

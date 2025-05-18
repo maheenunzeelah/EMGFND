@@ -1,10 +1,11 @@
+# %%
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import time
-
+# %%
 def google_image_search(query, num_images=5):
     # Set up Chrome with WebDriver Manager
     options = webdriver.ChromeOptions()
@@ -30,7 +31,7 @@ def google_image_search(query, num_images=5):
         for idx, section in enumerate(image_sections, 1):
         # Within each section, find all img tags with src
            imgs = section.find_elements(By.XPATH, './/div[2]//img[@src]')
-           image_urls = [img.get_attribute("src") for img in imgs if img.get_attribute("src")]
+           image_urls = [img.get_attribute("src").strip()[:5] for img in imgs if img.get_attribute("src")][0]
            all_section_images.append(image_urls)
 
     
@@ -38,3 +39,9 @@ def google_image_search(query, num_images=5):
     finally:
         driver.quit()
     return all_section_images 
+
+# %%
+img= google_image_search("Donald Trump",2)
+# %%
+print(img)
+# %%
