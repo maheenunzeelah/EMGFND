@@ -1,6 +1,7 @@
 import re
 import unicodedata
 from bs4 import BeautifulSoup
+import datetime
 
 # Map of common Unicode code points to their ASCII equivalents
 unicode_replacements = {
@@ -55,3 +56,43 @@ def remove_na_rows(df,col):
 
 def subset_df(df,cols):
    return df[cols]
+
+
+def clean_ocr_text(text):
+    # Replace multiple spaces/newlines/tabs with a single space
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\w\s.,!?\'"-]', '', text) 
+    # Strip leading/trailing spaces
+    text = text.strip()
+    
+    # Optionally, remove unwanted characters (if any)
+    # For example, remove non-ASCII or non-printable chars:
+    text = re.sub(r'[^\x00-\x7F]+', '', text)
+    
+    return text
+
+def extract_year(date_val):
+    if isinstance(date_val, (int, float)):
+        dt = datetime.datetime.utcfromtimestamp(date_val)
+    elif isinstance(date_val, str):
+        try:
+            dt = datetime.datetime.strptime(date_val, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return ""  # Fallback if format is unexpected
+    else:
+        return ""  # Fallback for unknown types
+
+    year = dt.year
+    return year
+
+def is_number_like(text):
+    """Return True if the text is mostly numeric (e.g., '25', '2023', '3rd')"""
+    text = text.strip().lower()
+    return bool(re.fullmatch(r'[\d,.\-–/]+(st|nd|rd|th)?', text)) or text.isdigit()
+
+def normalize_name_part(part):
+    # Lowercase, remove trailing apostrophe s, and remove non-alpha chars
+    part = part.lower()
+    part = re.sub(r"'s$", "", part)          # Remove trailing 's (apostrophe s)
+    part = re.sub(r"[^a-z]", "", part)       # Remove all non-alpha chars
+    return part
