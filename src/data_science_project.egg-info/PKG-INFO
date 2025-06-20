@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: data_science_project
+Version: 0.1.0
+Summary: A data science project template
+Author: Your Name
+Author-email: your.email@example.com
+Requires-Python: >=3.9
+Dynamic: author
+Dynamic: author-email
+Dynamic: requires-python
+Dynamic: summary

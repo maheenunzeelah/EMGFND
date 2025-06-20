@@ -1,0 +1,11 @@
+text_embed_model = "clip"
+text_embed_size = 768
+image_embed_model = "clip"
+image_embed_size = 768
+IMG_PATH = "allData/images"
+batch_size = 32
+lr = 2e-4
+weight_decay = 1e-4
+dropout = 0.3
+gradient_accumulation_steps = 1
+epochs = 100
