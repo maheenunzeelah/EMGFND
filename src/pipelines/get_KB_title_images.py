@@ -3,15 +3,13 @@ import asyncio
 import pickle
 import aiohttp
 import time
-from pipelines.similairty_graph_pipeline import get_embeddings
-from utils.image_utils import  get_pil_image_cached
+from utils.reference_images import get_batch, images_exist_for_index, load_images_for_batch, process_img_embeddings_batch, save_images_from_batch
 import utils.tagMe as tagme
 import requests
 from pathlib import Path
 import os
 from dotenv import load_dotenv
 import pandas as pd
-import spacy
 import json
 import hashlib
 import numpy as np
@@ -21,57 +19,21 @@ import concurrent.futures
 from PIL import Image as PILImage
 import io
 from tqdm import tqdm 
+
 # %%
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 IMG_PATH = "allData_images"
-# Global caches
-# %%
-nlp = spacy.load("en_core_web_trf")
+
 # Global caches
 annotation_cache = {}  # Cache for TagMe API responses
 image_cache = []  # Your existing image cache
-
 
 # %%
 load_dotenv(override=True)
 GCUBE_TOKEN = os.getenv('TAG_ME_TOKEN')
 
-# %%
-def process_embeddings_batch(all_img, df, IMG_PATH, get_embeddings):
-    """Optimized batch processing"""
-    all_embeddings = []
-    # Pre-build all image paths to avoid repeated string operations
-    img_paths = [
-        os.path.join(IMG_PATH, df['image_filename'][i]).replace("\\", "/") + '.jpg'
-        for i in range(len(all_img))
-    ]
-    print(all_img)
-    # Process in batches or all at once depending on memory constraints
-    for i, row in enumerate(all_img):
-        # Collect all URLs for this row
-        
-        imgs = [img for img in row]
-        imgs.append(get_pil_image_cached(img_paths[i]))  # Add the main image path
-        
-        # Load all images for this row in parallel
-        # images = load_images_parallel(img_urls, max_workers=8)
-        
-        # Filter out failed loads if needed
-        valid_images = [img for img in imgs if img is not None]
-        
-        if valid_images:
-            # Single embedding call per row
-          
-            emb = get_embeddings(valid_images)
-            all_embeddings.append(emb)  # Keep same structure as original
-            print(f"Row {i}: processed {len(valid_images)} images")
-        else:
-            print(f"Row {i}: no valid images")
-            all_embeddings.append(torch.empty((0, 4096)))
-    
-    return all_embeddings
 # %%
 def get_or_create_event_loop():
     """Get existing event loop or create new one if needed"""
@@ -113,7 +75,7 @@ class AsyncTagMeClient:
             use_dns_cache=True,
         )
         
-        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        timeout = aiohttp.ClientTimeout(total=60, connect=20)
         self.session = aiohttp.ClientSession(
             connector=connector,
             timeout=timeout,
@@ -182,7 +144,7 @@ class AsyncWikipediaClient:
         
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(limit=30, limit_per_host=15)
-        timeout = aiohttp.ClientTimeout(total=20, connect=5)
+        timeout = aiohttp.ClientTimeout(total=60, connect=20)
         self.session = aiohttp.ClientSession(
             connector=connector, 
             timeout=timeout
@@ -193,7 +155,7 @@ class AsyncWikipediaClient:
         if self.session:
             await self.session.close()
     
-    async def get_entity_image_async(self, entity_title, lang='en', image_size='small',return_pil=False):
+    async def get_entity_image_async(self, entity_title, lang='en', image_size='small', return_pil=False):
         """Async version of get_entity_image"""
         async with self.semaphore:
             try:
@@ -213,12 +175,10 @@ class AsyncWikipediaClient:
                 }
                 
                 async with self.session.get(api_url, params=params) as response:
-                  
                     if response.status != 200:
                         return None
                         
                     data = await response.json()
-                 
                     pages = data.get('query', {}).get('pages', {})
                     
                     for page_id, page_data in pages.items():
@@ -242,13 +202,20 @@ class AsyncWikipediaClient:
                             # Download and open as PIL Image
                             async with self.session.get(image_url) as img_response:
                                 if img_response.status == 200:
-                                    img_bytes = await img_response.read()
+                                    try:
+                                        img_bytes = await img_response.read()
+                                    except aiohttp.ClientPayloadError as e:
+                                        logger.warning(f"Incomplete image payload for {entity_title}: {e}")
+                                        return None
+                                    except aiohttp.ContentLengthError as e:
+                                        logger.warning(f"Content length error for {entity_title}: {e}")
+                                        return None
                                     pil_img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
                                     return pil_img
                                 else:
                                     return None
                         else:        
-                        # Extract description
+                            # Extract description
                             description = ""
                             terms = page_data.get('terms', {})
                             if 'description' in terms:
@@ -314,7 +281,7 @@ async def get_images_batch_async(entity_titles, wiki_client):
         logger.info(f"Fetching {len(uncached_titles)} uncached images")
         
         tasks = [
-            wiki_client.get_entity_image_async(title,return_pil=True) 
+            wiki_client.get_entity_image_async(title, return_pil=True) 
             for title in uncached_titles
         ]
         
@@ -340,14 +307,11 @@ async def extract_top_entities_async(annotations, max_count, linked_name_cache,
     min_score_threshold = 0.1
 
     for ann in annotations.get_annotations(min_score_threshold):
-        if not is_required_entity(ann.mention):
-            continue
         if ann.entity_title in global_seen_entities:
             continue
         entity_scores.append({
             "score": ann.score,
             "original": ann.mention,
-            "ent_type": nlp(ann.entity_title)[0].ent_type_,
             "linked_title": ann.entity_title,
             "ann": ann
         })
@@ -375,31 +339,6 @@ async def extract_top_entities_async(annotations, max_count, linked_name_cache,
 
     return images[:max_count] 
 
-def is_required_entity(entity):
-    return nlp(entity)[0].ent_type_.lower() in ['person', 'gpe', 'fac', 'org', 'work_of_art', 'norp', 'loc']
-
-def split_text_into_chunks_optimized(text, num_chunks=3):
-    """Optimized text splitting with sentence reuse"""
-    doc = nlp(text)
-    sentences = [sent.text.strip() for sent in doc.sents]
-    total = len(sentences)
-    
-    if total <= num_chunks:
-        return sentences
-    
-    chunk_size = total // num_chunks
-    chunks = []
-    
-    for i in range(0, total, chunk_size):
-        chunk_sentences = sentences[i:i + chunk_size]
-        if i + chunk_size >= total:  # Last chunk gets remaining
-            chunk_sentences = sentences[i:]
-        chunks.append(' '.join(chunk_sentences))
-        if len(chunks) >= num_chunks:
-            break
-    
-    return chunks
-
 async def process_single_text_async(text_data, tagme_client, wiki_client):
     """Async processing of a single text"""
     text, index = text_data
@@ -408,59 +347,19 @@ async def process_single_text_async(text_data, tagme_client, wiki_client):
     logger.info(f"Processing text {index + 1}")
     
     try:
-        # Split headline and body
-        parts = text.split('<body>')
-        if len(parts) != 2:
-            logger.warning(f"Text {index + 1} doesn't have proper <body> separator")
+        # Process the text directly with TagMe
+        annotations = await tagme_client.annotate_async(text, f"text_{index}")
+        
+        if annotations:
+            images = await extract_top_entities_async(
+                annotations, 9, linked_name_cache, 
+                entity_dedup_cache, wiki_client
+            )
+            logger.info(f"Text {index + 1} completed: {len(images)} images")
+            return images
+        else:
+            logger.info(f"Text {index + 1} completed: 0 images (no annotations)")
             return []
-            
-        headline, body = parts[0], parts[1]
-        all_images = []
-        
-        # Process headline
-        headline_annotations = await tagme_client.annotate_async(
-            headline, f"headline_{index}"
-        )
-        if headline_annotations:
-            head_images = await extract_top_entities_async(
-                headline_annotations, 3, linked_name_cache, 
-                entity_dedup_cache, wiki_client
-            )
-            all_images.extend(head_images)
-        
-        # Process body chunks
-        body_chunks = split_text_into_chunks_optimized(body, 3)
-        
-        # Process all chunks concurrently
-        chunk_tasks = []
-        for chunk_idx, chunk in enumerate(body_chunks):
-            task = tagme_client.annotate_async(chunk, f"body_{index}_{chunk_idx}")
-            chunk_tasks.append((task, chunk_idx))
-        
-        # Wait for all annotations
-        chunk_annotations = []
-        for task, chunk_idx in chunk_tasks:
-            annotations = await task
-            if annotations:
-                chunk_annotations.append(annotations)
-        
-        # Process entity extraction for chunks
-        chunk_image_tasks = []
-        for annotations in chunk_annotations:
-            task = extract_top_entities_async(
-                annotations, 2, linked_name_cache, 
-                entity_dedup_cache, wiki_client
-            )
-            chunk_image_tasks.append(task)
-        
-        # Wait for all chunk images
-        if chunk_image_tasks:
-            chunk_image_results = await asyncio.gather(*chunk_image_tasks)
-            for chunk_images in chunk_image_results:
-                all_images.extend(chunk_images)
-        
-        logger.info(f"Text {index + 1} completed: {len(all_images)} images")
-        return all_images
         
     except Exception as e:
         logger.error(f"Error processing text {index + 1}: {e}")
@@ -529,11 +428,8 @@ async def process_large_dataset_async(df, gcube_token, batch_size=200, max_concu
         end_idx = min(start_idx + batch_size, total_rows)
         logger.info(f"Processing batch {start_idx}-{end_idx} of {total_rows}")
         
-        # Create batch texts
-        batch_texts = (
-            df['resolved_title'].iloc[start_idx:end_idx] + " <body>" + 
-            df['resolved_text'].iloc[start_idx:end_idx]
-        ).tolist()
+        # Create batch texts - using only the title column
+        batch_texts = df['title'].iloc[start_idx:end_idx].tolist()
         
         # Process batch async
         batch_results = await batch_image_analysis_async(
@@ -617,145 +513,44 @@ async def run_large_dataset_in_existing_loop(df, gcube_token, batch_size=200, ma
     return await process_large_dataset_async(df, gcube_token, batch_size, max_concurrent)
 
 # %%
+# Example usage:
+df = pd.read_csv("datasets/processed/all_data_df_resolved.csv")
+embedding_df = pd.read_pickle("src/embeddings/clip_img_title_embeddings/image_embeddings_3200.pkl")
+print(embedding_df.info(), "before appending")
 
-df=pd.read_csv("datasets/processed/all_data_df_resolved.csv")
-# embedding_df = pd.DataFrame(columns=["index", "referenced_image_embeddings"])
-embedding_df = pd.read_pickle("src/embeddings/image_embeddings_400.pkl")
 
-# %%
-# # Get already processed indices
-# processed_indices = set(embedding_df['index'])
-# print(f"Already processed indices: {len(processed_indices)}")
-# # # Filter df to skip already processed rows
-# remaining_df = df[~df.index.isin(processed_indices)]
-# print(f"Remaining rows to process: {len(remaining_df)}")
+# # === Batch selection ===
+batch_df = get_batch(3200,len(df),df)
+# # texts = batch_df['title'].tolist()
 
-def append_embeddings_to_df(new_embeddings, batch_df):
-    print(new_embeddings)
-    batch_df["referenced_images"] = new_embeddings
-    # flattened = torch.cat(all_embeddings, dim=0)  # Shape: [total_images, 4096]
+# # === Check if analysis is needed ===
+image_dir = "reference_images_from_title"
 
-    # # Convert to NumPy
-    # new_embeddings = flattened.cpu().numpy()
+# # missing_indices = [idx for idx in batch_df.index if  images_exist_for_index(idx, image_dir) != "file exists"]
 
-    # if os.path.exists(file_path):
-    #     existing_embeddings = np.load(file_path)
-    #     combined = np.concatenate((existing_embeddings, new_embeddings), axis=0)
-    # else:
-    #     combined = new_embeddings
+# # print(missing_indices)
+# # if len(missing_indices) > 0:
+# #     print("Images missing for indices:", missing_indices)
+# #     texts = batch_df.loc[missing_indices, 'resolved_title'].tolist()
+# #     all_imgs = run_async_batch_analysis(texts, GCUBE_TOKEN, max_concurrent_texts=8)
+# #     save_images_from_batch(all_imgs, missing_indices, image_dir)
 
-    # np.save(file_path, combined)
+# # else:
+# #     print("All images exist. Skipping run_async_batch_analysis.")
+all_imgs = load_images_for_batch(batch_df, image_dir)
+print(f"Loaded {len(all_imgs)} images for batch {batch_df.index.tolist()}")
 
-def get_batch(df, batch_number, batch_size=400):
-    start = batch_number * batch_size
-    end = min(start + batch_size, len(df))
-    return df.iloc[400:800]
+all_embeddings = process_img_embeddings_batch(all_imgs, df, batch_df, IMG_PATH, model="clip")
+print(f"Processed {len(all_embeddings)} embeddings for batch {batch_df.index.tolist()}")
 
-batch_number = 1
-batch_df = get_batch(df, batch_number)
-
-texts = (batch_df['resolved_title'] + " <body>" + batch_df['resolved_text']).tolist()
-all_imgs = run_async_batch_analysis(texts, GCUBE_TOKEN, max_concurrent_texts=8)
-all_embeddings = process_embeddings_batch(all_imgs, df, IMG_PATH, get_embeddings)
 # Create batch embedding dataframe
 batch_embedding_df = pd.DataFrame({
     "index": batch_df.index,  # preserves mapping to original df
     "referenced_image_embeddings": all_embeddings
 })
+print(batch_embedding_df.info())
 
-# # # Append to the master embedding DataFrame
+# Append to the master embedding DataFrame
 embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
-embedding_df.to_pickle("src/embeddings/image_embeddings_800.pkl")
-
-
-
-
-# append_embeddings_to_df(all_embeddings,batch_df)
-# batch_df.head()
-    # with open("all_imgs.pkl", "wb") as f:
-    #     pickle.dump(all_imgs, f)
-
-# Load later
-# with open("all_imgs.pkl", "rb") as f:
-#     all_imgs = pickle.load(f)
-
-# %%
-# df["referenced_images"] = None
-# df["referenced_images"].iloc[:200] = all_img[:200]
-# df.to_csv("datasets/processed/all_data_df_resolved_with_ref_images_200.csv", index=False)
-# image_vec_full = np.load("../embeddings/imgs_embeddings.npy")
-# print(f"Total images in embeddings: {image_vec_full.shape[0]} with shape {image_vec_full.shape[1]}")
-# all_image_vec = np.concatenate([image_vec_full, image_vec_full], axis=0)
-# print(f"Total images in all_image_vec: {all_image_vec.shape[0]} with shape {all_image_vec.shape[1]}")
-# # %%
-# df.info()
-# %%
-# all_embeddings = []  # list of (n_i, 4096) matrices per row
-
-# for i, row in enumerate(all_img):
-#     main_node_img = df['image_filename'][i]
-#     row_embeddings = []
-#     images = [get_pil_image(img.url) for img in row]
-#     img_path = os.path.join(IMG_PATH, main_node_img).replace("\\", "/") +'.jpg'
-#     images.append(get_pil_image(img_path))
-#     emb = get_embeddings(images)
-#     row_embeddings.append(emb)
-  
-#         # If you want to store (embedding, label, title, etc.) you can build a dict instead
-#         # row_embeddings.append({'embedding': emb, 'label': label, 'title': img_obj.title})
-
-#     if row_embeddings:
-#         print(len(row_embeddings),"row embeddings")
-#         all_embeddings.append(row_embeddings)  # shape: (n_images, 4096)
-#     # else:
-#     #     all_embeddings.append(torch.empty((0, 4096)))  # handle empty rows
-# %%
-# def load_images_parallel(img_urls, max_workers=10):
-#     """Load multiple images in parallel"""
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-#         # Submit all tasks
-#         future_to_url = {
-#             executor.submit(get_pil_image_cached, url): url 
-#             for url in img_urls
-#         }
-        
-#         # Collect results in order
-#         images = []
-#         for future in concurrent.futures.as_completed(future_to_url):
-#             try:
-#                 image = future.result()
-#                 images.append(image)
-#             except Exception as e:
-#                 url = future_to_url[future]
-#                 print(f"Failed to load image {url}: {e}")
-#                 # You might want to append None or skip this image
-#                 images.append(None)
-        
-#         return images
-
-
-# # %%
-
-
-
-
-
-# %%
-# print(f"Total embeddings processed: {all_embeddings[0]}")
-# print(len(all_imgs))
-# # count = sum(1 for sublist in img_df['referenced_images'][:200] if len(sublist) < 2)
-# # print(f"Sublists with less than 2 elements: {count}")
-# # %%
-# import re
-# import matplotlib.pyplot as plt
-# image_counts = [len(row) if isinstance(row, list) and all(isinstance(img, PILImage.Image) for img in row) else 0 for row in all_imgs]
-
-# # Step 2: Plot as line graph
-# plt.figure(figsize=(14, 6))
-# plt.plot(range(len(image_counts)), image_counts, marker='o', linestyle='-')
-# plt.xlabel("Index of all_imgs")
-# plt.ylabel("Number of Pillow Images")
-# plt.title("Number of Referenced Pillow Images per Row (all_imgs)")
-# plt.grid(True)
-# plt.show()
-# %%
+print(embedding_df.info())
+embedding_df.to_pickle("src/embeddings/clip_img_title_embeddings/image_embeddings.pkl")
