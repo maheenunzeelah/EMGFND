@@ -26,7 +26,14 @@ embeddings/
 reference_text/
 reference_title/
 best_models/
-
+media_eval_test_imgs/
+media_eval_train_imgs/
+media_eval_reference_images/
+media_eval_reference_test_images/
+all_data_reference_images/
+all_data_reference_images.zip
+visuals/
+test_datasets/
 
 # Files to ignore
 public_images.tar

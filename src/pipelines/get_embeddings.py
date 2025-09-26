@@ -1,4 +1,5 @@
 # %%
+import config
 import torch
 from torchvision import models, transforms
 from transformers import CLIPModel, CLIPProcessor
@@ -59,7 +60,7 @@ def transform_embedding(image, model, transform, device):
         embedding = model(image)
     return embedding.squeeze(0).cpu()   # Remove batch dim
 
-def get_embeddings(imgs, model = "clip"):
+def get_embeddings(imgs, model = config.image_embed_model):
     
     if model != "clip":
         transform = transforms.Compose([

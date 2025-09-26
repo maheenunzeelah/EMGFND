@@ -1,38 +1,107 @@
 ## Importing libraries
-from image_graph_prediction.config import Config
+from image_graph_prediction.evaluation_utils import eval_func
+from image_graph_prediction.model_config import Config
 from image_graph_prediction.model import PGATClassifier
-from image_graph_prediction.utils import set_up_multimodal_dataset
+from image_graph_prediction.utils import set_up_media_eval_dataset, set_up_multimodal_dataset
 import numpy as np
-import pandas as pd
+
 import math
-import os
+
 
 import torch
 from torch import nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from torch_geometric.data import Data, Dataset
-from torch_geometric.loader import DataLoader
-from sklearn.model_selection import train_test_split
 
-import torchmetrics
-from torchmetrics import Accuracy, Precision, Recall, F1Score
+from torch.optim import AdamW
+
+from torch_geometric.loader import DataLoader
+
+
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 
 from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
 import wandb
+from image_graph_prediction.utils import plot_acc_graph, plot_loss_graph
+
 
 # Initialize wandb
 wandb.init(project="multimodal-graph-classification", entity="", name="multimodal-experiment")
 
+
+class AUCMetrics:
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.predictions = []
+        self.targets = []
+    
+    def update(self, preds, targets):
+        """Update with batch predictions and targets"""
+        if torch.is_tensor(preds):
+            # Apply sigmoid if not already applied
+            if preds.min() < 0 or preds.max() > 1:
+                preds = torch.sigmoid(preds)
+            preds = preds.detach().cpu().numpy()
+        if torch.is_tensor(targets):
+            targets = targets.detach().cpu().numpy()
+        
+        self.predictions.extend(preds.flatten())
+        self.targets.extend(targets.flatten())
+    
+    def compute_metrics(self):
+        """Compute all AUC-related metrics"""
+        if len(self.predictions) == 0:
+            return {}
+        
+        preds = np.array(self.predictions)
+        targets = np.array(self.targets)
+        
+        # ROC AUC
+        try:
+            roc_auc = roc_auc_score(targets, preds)
+        except ValueError:
+            roc_auc = 0.5  # If only one class present
+        
+        # Precision-Recall AUC
+        try:
+            precision, recall, _ = precision_recall_curve(targets, preds)
+            pr_auc = auc(recall, precision)
+        except ValueError:
+            pr_auc = 0.0
+        
+        # ROC Curve data for plotting
+        try:
+            fpr, tpr, _ = roc_curve(targets, preds)
+            roc_data = (fpr, tpr)
+        except ValueError:
+            roc_data = None
+        
+        # PR Curve data for plotting
+        try:
+            precision, recall, _ = precision_recall_curve(targets, preds)
+            pr_data = (precision, recall)
+        except ValueError:
+            pr_data = None
+        
+        return {
+            'roc_auc': roc_auc,
+            'pr_auc': pr_auc,
+            'roc_data': roc_data,
+            'pr_data': pr_data
+        }
+
+
+
+# =====================================================
+# UTILITY FUNCTIONS
+# =====================================================
 
 def set_seed(seed):
     """Set random seeds for reproducibility"""
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 def check_for_nan_inf(tensor, name):
     """Helper function to check for NaN or Inf values"""
@@ -50,28 +119,30 @@ def create_fresh_model():
     """Create a completely fresh model instance to avoid state retention"""
     return PGATClassifier()
 
+# =====================================================
+# TRAINING FUNCTION
+# =====================================================
 
 def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, criterion):
-    """Training function for one epoch with proper graph management"""
+    """Training function for balanced datasets"""
     model.train()
     total_loss = 0
     valid_batches = 0
     
-    # Initialize metrics once per epoch
+    # Initialize metrics
     train_acc = BinaryAccuracy().to(device)
     train_prec = BinaryPrecision().to(device)
     train_rec = BinaryRecall().to(device)
     train_f1 = BinaryF1Score().to(device)
-   
     
-    # criterion = nn.BCEWithLogitsLoss()
+    # Track predictions
+    all_preds = []
+    all_targets = []
     
     for batch_idx, batch in enumerate(dataloader):
         try:
-            # CRITICAL: Always zero gradients FIRST and clear any retained graphs
             optimizer.zero_grad()
             
-            # Move batch to device
             batch = batch.to(device)
             
             # Validate batch data
@@ -79,37 +150,33 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
                 print(f"Skipping batch {batch_idx} due to NaN/Inf in input features")
                 continue
             
-            # Ensure edge_index is properly formatted
             if batch.edge_index.dtype != torch.long:
                 batch.edge_index = batch.edge_index.long()
             
-            # CRITICAL: Detach all inputs to ensure no gradient tracking from previous iterations
+            # Detach all inputs to ensure no gradient tracking from previous iterations
             x_input = batch.x.detach().requires_grad_(True)
             edge_index_input = batch.edge_index.detach()
             batch_input = batch.batch.detach() if hasattr(batch, 'batch') else None
             
-            # Forward pass - completely fresh computation graph
+            # Forward pass
             if batch_input is not None:
                 out = model(x_input, edge_index_input, batch_input)
             else:
                 out = model(x_input, edge_index_input)
             
-            # Validate model output
             if check_for_nan_inf(out, f"model output at batch {batch_idx}"):
                 print(f"Skipping batch {batch_idx} due to NaN/Inf in model output")
                 continue
             
-            # Prepare targets - ensure proper shape and type
+            # Prepare targets
             targets = batch.y.float().detach()
             if targets.dim() > 1:
                 targets = targets.view(-1)
             
-            # Validate targets
             if check_for_nan_inf(targets, f"targets at batch {batch_idx}"):
                 print(f"Skipping batch {batch_idx} due to NaN/Inf in targets")
                 continue
             
-            # Ensure output and targets have the same shape
             if out.shape != targets.shape:
                 print(f"Shape mismatch at batch {batch_idx}: out {out.shape}, targets {targets.shape}")
                 continue
@@ -117,7 +184,6 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
             # Calculate loss
             loss = criterion(out, targets)
             
-            # Validate loss
             if check_for_nan_inf(loss, f"loss at batch {batch_idx}"):
                 print(f"Skipping batch {batch_idx} due to NaN/Inf in loss")
                 continue
@@ -125,42 +191,37 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
             # Backward pass
             loss.backward()
             
-            # Gradient clipping after backward pass
+            # Gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
-            # Check for gradient issues
             if torch.isnan(grad_norm) or torch.isinf(grad_norm):
-                print(f"Skipping batch {batch_idx} due to NaN/Inf gradients (norm: {grad_norm})")
-                optimizer.zero_grad()  # Clear bad gradients
+                print(f"Skipping batch {batch_idx} due to NaN/Inf gradients")
+                optimizer.zero_grad()
                 continue
             
-            # Update parameters
             optimizer.step()
             scheduler.step()
             
-            # Accumulate loss
             total_loss += loss.item()
             valid_batches += 1
             
-            # Calculate metrics with proper detachment
+            # Calculate metrics
             with torch.no_grad():
-                # Detach and move to CPU immediately
                 preds = torch.sigmoid(out.detach()).cpu()
                 targets_cpu = targets.detach().cpu()
                 
-                # Clamp predictions to valid range
-                preds = torch.clamp(preds, 0.0, 1.0)
+                preds_binary = (preds > 0.5).float()
+                
+                # Store for detailed analysis
+                all_preds.extend(preds_binary.numpy())
+                all_targets.extend(targets_cpu.numpy())
                 
                 # Update metrics
-                train_acc.update(preds, targets_cpu)
-                train_prec.update(preds, targets_cpu)
-                train_rec.update(preds, targets_cpu)
-                train_f1.update(preds, targets_cpu)
-            
-            # Print progress
-            # if batch_idx % 10 == 0:
-            #     print(f"Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}, Grad Norm: {grad_norm:.4f}")
-            
+                train_acc.update(preds_binary, targets_cpu)
+                train_prec.update(preds_binary, targets_cpu)
+                train_rec.update(preds_binary, targets_cpu)
+                train_f1.update(preds_binary, targets_cpu)
+                
         except RuntimeError as e:
             if "backward through the graph a second time" in str(e):
                 print(f"CRITICAL: Graph reuse error in batch {batch_idx}")
@@ -173,17 +234,17 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
                 
             else:
                 print(f"Runtime error in batch {batch_idx}: {str(e)}")
-                optimizer.zero_grad()  # Clear gradients on any error
+                optimizer.zero_grad()
             
             continue
             
         except Exception as e:
             print(f"Unexpected error in batch {batch_idx}: {str(e)}")
-            optimizer.zero_grad()  # Clear gradients on any error
+            optimizer.zero_grad()
             continue
         
         finally:
-            # CRITICAL: Explicit cleanup after each batch
+            # Explicit cleanup after each batch
             if 'out' in locals():
                 del out
             if 'loss' in locals():
@@ -201,7 +262,7 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
             if batch_idx % 20 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
-    # Compute final metrics
+    # Calculate final metrics
     if valid_batches > 0:
         train_report = {
             "accuracy": train_acc.compute().item(),
@@ -210,103 +271,18 @@ def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, cri
             "f1_score": train_f1.compute().item()
         }
         avg_loss = total_loss / valid_batches
-        print(f"Processed {valid_batches}/{len(dataloader)} valid batches")
     else:
-        print("WARNING: No valid batches processed!")
-        train_report = {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1_score": 0.0}
+        train_report = {
+            "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1_score": 0.0
+        }
         avg_loss = float('inf')
     
     return avg_loss, train_report
-            
 
-def eval_func(model, dataloader, device, criterion, epoch):
-    """Evaluation function with improved error handling"""
-    model.eval()
-    total_loss = 0
-    valid_batches = 0
-    
-    # Initialize metrics
-    val_acc = BinaryAccuracy().to(device)
-    val_prec = BinaryPrecision().to(device)
-    val_rec = BinaryRecall().to(device)
-    val_f1 = BinaryF1Score().to(device)
 
-    all_preds = []
-    all_targets = []
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            try:
-                batch = batch.to(device)
-                
-                # Validate input data
-                if check_for_nan_inf(batch.x, f"val batch.x at batch {batch_idx}"):
-                    continue
-                
-                # Ensure edge_index is properly formatted
-                if batch.edge_index.dtype != torch.long:
-                    batch.edge_index = batch.edge_index.long()
-                
-                # Forward pass
-                out = model(batch.x, batch.edge_index, batch.batch)
-                
-                # Validate output
-                if check_for_nan_inf(out, f"val model output at batch {batch_idx}"):
-                    continue
-                
-                # Prepare targets
-                targets = batch.y.float()
-                if targets.dim() > 1:
-                    targets = targets.view(-1)
-                
-                # Ensure shapes match
-                if out.shape != targets.shape:
-                    continue
-                
-                loss = criterion(out, targets)
-                
-                if not check_for_nan_inf(loss, f"val loss at batch {batch_idx}"):
-                    total_loss += loss.item()
-                    valid_batches += 1
-                    
-                    # Calculate metrics
-                    preds = torch.sigmoid(out).cpu()
-                    targets_cpu = targets.cpu()
-                    
-                    preds = torch.clamp(preds, 0.0, 1.0)
-
-                    all_preds.append((preds > 0.5).long())
-                    all_targets.append(targets_cpu.long())
-                    
-                    val_acc.update(preds, targets_cpu)
-                    val_prec.update(preds, targets_cpu)
-                    val_rec.update(preds, targets_cpu)
-                    val_f1.update(preds, targets_cpu)
-                    
-            except Exception as e:
-                print(f"Error in validation batch {batch_idx}: {str(e)}")
-                continue
-    
-    # Compute final metrics
-    if valid_batches > 0:
-        acc = val_acc.compute().item()
-        prec = val_prec.compute().item()
-        rec = val_rec.compute().item()
-        f1_score = val_f1.compute().item()
-        avg_loss = total_loss / valid_batches
-    else:
-        acc = prec = rec = f1_score = 0.0
-        avg_loss = float('inf')
-    
-    report = {
-        "accuracy": acc,
-        "precision": prec,
-        "recall": rec,
-        "f1_score": f1_score
-    }
-    all_preds = torch.cat(all_preds).numpy()
-    all_targets = torch.cat(all_targets).numpy()
-    return avg_loss, report, acc, prec, rec, f1_score,  all_targets, all_preds
-
+# =====================================================
+# MAIN TRAINING CODE
+# =====================================================
 
 # Configuration
 config = Config()
@@ -314,29 +290,46 @@ config = Config()
 if __name__ == '__main__':
     
     ## Setup the dataset 
-    dataset_name = "multimodal"
+    dataset_name = "media_eval"
     set_seed(42) 
 
     if dataset_name == "multimodal":  
         dataset_train, dataset_val, dataset_test = set_up_multimodal_dataset()
     else:
-        print("No Data")
+        dataset_train, dataset_val, dataset_test = set_up_media_eval_dataset()
+    
+    # Print dataset sizes
+    print(f"\nDataset sizes:")
+    print(f"Training set: {len(dataset_train)} samples")
+    print(f"Validation set: {len(dataset_val)} samples")
+    print(f"Test set: {len(dataset_test)} samples")
+    
+    # =====================================================
+    # SETUP TRAINING COMPONENTS
+    # =====================================================
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Standard BCE loss for balanced datasets
+    criterion = nn.BCEWithLogitsLoss()
+    print("Using standard BCEWithLogitsLoss")
     
     ## Setup the dataloaders
     dataloader_train = DataLoader(
         dataset_train,
         batch_size=config.batch_size,
-        drop_last=False,
         shuffle=True,
+        drop_last=False,
         pin_memory=True if torch.cuda.is_available() else False,
-        num_workers=0  # Set to 0 to avoid multiprocessing issues
+        num_workers=0
     )
 
     dataloader_val = DataLoader(
         dataset_val,
         batch_size=config.batch_size,
         drop_last=False,
-        shuffle=False,  # Don't shuffle validation
+        shuffle=False,
         pin_memory=True if torch.cuda.is_available() else False,
         num_workers=0
     ) 
@@ -349,11 +342,8 @@ if __name__ == '__main__':
         pin_memory=True if torch.cuda.is_available() else False,
         num_workers=0
     )
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
     
-    ## Initialize the fixed model
+    ## Initialize the model
     gnn_model = PGATClassifier()
     print("Total number of parameters:", sum(p.numel() for p in gnn_model.parameters()))
     gnn_model.to(device)
@@ -362,88 +352,81 @@ if __name__ == '__main__':
     num_update_steps_per_epoch = math.ceil(len(dataloader_train) / config.gradient_accumulation_steps)
     num_train_steps = num_update_steps_per_epoch * config.epochs
     
-    # Use a more conservative learning rate and optimizer settings
+    # Optimizer settings
     optimizer = AdamW(
         gnn_model.parameters(), 
-        lr=config.lr * 0.1,  # Reduce learning rate
-        weight_decay=1e-4,   # Slightly less weight decay
-        eps=1e-8             # Epsilon for numerical stability
+        lr=config.lr,
+        weight_decay=config.weight_decay
     )
     
     scheduler = get_linear_schedule_with_warmup(
         optimizer, 
-        num_warmup_steps=10,  # More warmup steps
+        num_warmup_steps=10,
         num_training_steps=num_train_steps
     )
 
-    # Test the model thoroughly before training
-    print("Testing model with multiple batches...")
+    # Test the model before training
+    print("Testing model with sample batch...")
     try:
-        test_batches = 0
         for test_batch in dataloader_train:
             test_batch = test_batch.to(device)
             
-            # Forward pass
+            # Inference test
             gnn_model.eval()
             with torch.no_grad():
-                test_out = gnn_model(test_batch.x, test_batch.edge_index, test_batch.batch)
-            
-            # Backward pass
+                _ = gnn_model(test_batch.x, test_batch.edge_index, test_batch.batch)
+
+            # Training test
             gnn_model.train()
             optimizer.zero_grad()
-            test_out = gnn_model(test_batch.x, test_batch.edge_index, test_batch.batch)
+
+            fresh_x = test_batch.x.detach().clone().requires_grad_(True)
+            test_out = gnn_model(fresh_x, test_batch.edge_index, test_batch.batch)
             test_targets = test_batch.y.float()
             if test_targets.dim() > 1:
                 test_targets = test_targets.view(-1)
-            
-            test_loss = nn.BCEWithLogitsLoss()(test_out, test_targets)
+
+            test_loss = criterion(test_out, test_targets)
             test_loss.backward()
-            optimizer.zero_grad()
-            
-            # Clear everything
+            optimizer.step()
+
             del test_out, test_targets, test_loss
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-            test_batches += 1
-            if test_batches >= 3:  # Test first 3 batches
-                break
+            break
                 
-        print(f"Successfully tested {test_batches} batches")
+        print("Model test successful!")
         
     except Exception as e:
         print(f"Error in model testing: {e}")
         exit(1)
 
     best_loss = np.inf
-    
-    
-    def reinitialize_model_if_needed():
-            """Reinitialize model if graph issues persist"""
-            global gnn_model
-            print("Reinitializing model to clear any retained state...")
-            gnn_model = create_fresh_model()
-            gnn_model.to(device)
-            
-            # Reinitialize optimizer as well
-            optimizer = AdamW(
-                gnn_model.parameters(), 
-                lr=config.lr ,
-                weight_decay=1e-4,
-                # eps=1e-8
-            )
-            return optimizer
-        
-        # Add error recovery in your epoch loop:
+    best_acc = 0.0
+    epochs_no_improve = 0
+    early_stopping_patience = 3
     consecutive_errors = 0
     max_consecutive_errors = 3
-
-     # Calculate positive and negative samples for class weighting
-    num_pos = sum(1 for batch in dataloader_train for y in batch.y if y == 0)
-    num_neg = sum(1 for batch in dataloader_train for y in batch.y if y == 1)
     
-    pos_weight = torch.tensor([num_pos / num_neg], dtype=torch.float).to(device)
-
-    criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    def reinitialize_model_if_needed():
+        """Reinitialize model if graph issues persist"""
+        global gnn_model
+        print("Reinitializing model to clear any retained state...")
+        gnn_model = create_fresh_model()
+        gnn_model.to(device)
+        
+        # Reinitialize optimizer as well
+        optimizer = AdamW(
+            gnn_model.parameters(), 
+            lr=config.lr,
+            weight_decay=config.weight_decay
+        )
+        return optimizer
+    train_losses = []
+    val_losses = []
+    train_accs = []
+    val_accs = []
+    
+    print("\n=== STARTING TRAINING ===")
     
     for epoch in range(config.epochs):
         print(f"\n---------------------- Epoch: {epoch+1} ---------------------------------- \n")
@@ -453,7 +436,9 @@ if __name__ == '__main__':
         
         try:
             ## Training Loop
-            train_loss, train_report = train_func_epoch(epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, criterion)
+            train_loss, train_report = train_func_epoch(
+                epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, criterion
+            )
             consecutive_errors = 0  # Reset error counter on success
             
         except Exception as e:
@@ -470,8 +455,16 @@ if __name__ == '__main__':
                 continue
 
         ## Validation loop
-        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds = eval_func(gnn_model, dataloader_val, device, criterion, epoch+1)
-        print(confusion_matrix(val_labels, val_preds))
+        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds, val_auc_results= eval_func(
+            gnn_model, dataloader_val, device, epoch+1, criterion
+        )
+
+        
+        # Print confusion matrix if we have predictions
+        if len(val_labels) > 0 and len(val_preds) > 0:
+            print("Confusion Matrix:")
+            print(confusion_matrix(val_labels, val_preds))
+        
         print(f"\nEpoch: {epoch+1} | Training loss: {train_loss:.4f} | Validation Loss: {val_loss:.4f}")
         print()
         print("Train Report:")
@@ -480,7 +473,7 @@ if __name__ == '__main__':
         print("Validation Report:")
         print(f"Accuracy: {report['accuracy']:.4f} | Precision: {report['precision']:.4f} | Recall: {report['recall']:.4f} | F1: {report['f1_score']:.4f}")
         
-        # Only log to wandb if values are valid
+        # Log to wandb if values are valid
         if not any([math.isnan(x) or math.isinf(x) for x in [train_loss, val_loss, acc, prec, rec, f1_score]]):
             wandb.log({
                 "train_loss": train_loss, 
@@ -497,11 +490,80 @@ if __name__ == '__main__':
         
         print(f"\n----------------------------------------------------------------------------")
         
+        # Early stopping based on accuracy
+        if report["accuracy"] > best_acc:
+            best_acc = report["accuracy"]
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1    
+
+        if epochs_no_improve >= early_stopping_patience:
+            print(f"Early stopping triggered after {epoch+1} epochs. Best Acc: {best_acc:.4f}")
+            break
+            
         # Save best model
         if val_loss < best_loss:
             best_loss = val_loss
-            torch.save(gnn_model.state_dict(), "best_multimodal_model.pth")
+            torch.save({
+                'model_state_dict': gnn_model.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss
+            }, config.best_model_path)
             print(f"New best model saved with validation loss: {val_loss:.4f}")
 
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        train_accs.append(train_report["accuracy"])
+        val_accs.append(report["accuracy"])    
+
     print("Training completed!")
+    
+    print("\n=== EVALUATING ON TEST DATASET ===")
+
+    # Initialize torchmetrics on the correct device
+    test_accuracy = BinaryAccuracy().to(device)
+    test_precision = BinaryPrecision().to(device)
+    test_recall = BinaryRecall().to(device)
+    test_f1 = BinaryF1Score().to(device)
+
+    # Load the best model
+    try:
+        best_model_path = config.best_model_path
+        checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+        
+        # Load model state
+        gnn_model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded best model from epoch {checkpoint.get('epoch', 'unknown')}")
+        
+    except FileNotFoundError:
+        print("Best model not found, using current model state")
+
+    # Evaluate on test set
+    test_loss, test_report, test_acc, test_prec, test_rec, test_f1, test_labels, test_preds , test_auc_results = eval_func(
+        gnn_model, dataloader_test, device, 0, criterion
+    )
+
+    if len(test_labels) > 0 and len(test_preds) > 0:
+        print("Test Confusion Matrix:")
+        print(confusion_matrix(test_labels, test_preds))
+        
+    print(f"\nTest Loss: {test_loss:.4f}")
+    print(f"Test Accuracy: {test_acc:.4f} | Precision: {test_prec:.4f} | Recall: {test_rec:.4f} | F1: {test_f1:.4f}")
+    # print(f"Test Report: {test_report}")
+    print(
+    f"Class 0 (Real) Acc: {test_report['class_0_accuracy']:.4f} | "
+    f"Class 1 (Fake) Acc: {test_report['class_1_accuracy']:.4f} | "
+    f"Class 0 (Real) Precision: {test_report['class_0_precision']:.4f} | "
+    f"Class 1 (Fake) Precision: {test_report['class_1_precision']:.4f} | "
+    f"Class 0 (Real) Recall: {test_report['class_0_recall']:.4f} | "
+    f"Class 1 (Fake) Recall: {test_report['class_1_recall']:.4f} | "
+    f"Class 0 (Real) F1: {test_report['class_0_f1_score']:.4f} | "
+    f"Class 1 (Fake) F1: {test_report['class_1_f1_score']:.4f} | "
+    f"ROC AUC: {test_report['roc_auc']:.4f} | PR AUC: {test_report['pr_auc']:.4f}"
+    )
+   
     wandb.finish()
+
+plot_loss_graph(train_losses, val_losses)
+plot_acc_graph(train_accs, val_accs)

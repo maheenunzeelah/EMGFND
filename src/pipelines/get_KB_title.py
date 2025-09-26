@@ -523,34 +523,38 @@ def extract_entities_from_dataframe(df, gcube_token, max_concurrent_texts=20):
 
 #%%
 
-df = pd.read_csv("datasets/processed/all_data_df_resolved.csv")
+df = pd.read_csv("datasets/processed/media_eval_train_df_sample.csv")
+df = df.rename(columns={
+    'tweetText': 'resolved_title',
+})
 # embedding_df = pd.read_pickle("src/bert_title_embeddings/title_embeddings_1500.pkl")
 
 #%%
-batch_df = get_batch(0,len(df),df)
+batch_df = get_batch(0,10,df)
 
 # Extract entities from titles only
-# all_texts = extract_entities_from_dataframe(batch_df, GCUBE_TOKEN, max_concurrent_texts=8)
-
+all_texts = extract_entities_from_dataframe(batch_df, GCUBE_TOKEN, max_concurrent_texts=8)
+with open("src/embeddings/media_eval_bert_title_embeddings/train_text.json", "w", encoding="utf-8") as f:
+    json.dump(all_texts, f, ensure_ascii=False, indent=2)
 
 
 # %%
 
 # Process embeddings: entities + title + OCR
-with open("src/embeddings/bert_title_embeddings/all_texts.json", "r", encoding="utf-8") as f:
-    all_texts = json.load(f)
-title_embeddings = process_title_embeddings_batch(all_texts, batch_df, get_text_embedding)
+# with open("src/embeddings/bert_title_embeddings/all_texts.json", "r", encoding="utf-8") as f:
+#     all_texts = json.load(f)
+# title_embeddings = process_title_embeddings_batch(all_texts, batch_df, get_text_embedding)
 
-# # Create batch embedding dataframe
-batch_embedding_df = pd.DataFrame({
-    "index": batch_df.index,  # preserves mapping to original df
-    "title_embeddings": title_embeddings
-})
-# print(batch_embedding_df["title_embeddings"][2].shape)
-# Combine with existing embeddings
-# embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
-batch_embedding_df.to_pickle("src/embeddings/clip_title_embeddings/title_embeddings.pkl")
+# # # Create batch embedding dataframe
+# batch_embedding_df = pd.DataFrame({
+#     "index": batch_df.index,  # preserves mapping to original df
+#     "title_embeddings": title_embeddings
+# })
+# # print(batch_embedding_df["title_embeddings"][2].shape)
+# # Combine with existing embeddings
+# # embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
+# batch_embedding_df.to_pickle("src/embeddings/clip_title_embeddings/title_embeddings.pkl")
 
 # %%
-# with open("src/embeddings/bert_title_embeddings/all_texts.json", "w", encoding="utf-8") as f:
+# with open("src/embeddings/media_eval_bert_title_embeddings/all_texts.json", "w", encoding="utf-8") as f:
 #     json.dump(all_texts, f, ensure_ascii=False, indent=2)

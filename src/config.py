@@ -1,11 +1,49 @@
+dataset = "all_data"  # or "all_data"
 text_embed_model = "clip"
 text_embed_size = 768
 image_embed_model = "clip"
 image_embed_size = 768
-IMG_PATH = "allData/images"
-batch_size = 32
-lr = 2e-4
-weight_decay = 1e-4
-dropout = 0.3
-gradient_accumulation_steps = 1
-epochs = 100
+IMG_PATH = "allData_images" # "allData_images"
+
+all_data_path = "datasets/processed/all_data_df_resolved.csv"
+all_data_title_entities_df = "datasets/processed/all_data_df_title_entities.csv"
+all_data_text_entities_df = "datasets/processed/all_data_df_text_entities.csv"
+all_data_reference_images_dir = "all_data_reference_images"
+
+media_eval_train_path = "datasets/processed/media_eval_train_entities_df.csv"
+media_eval_test_path = "datasets/processed/media_eval_test_entities_df.csv"
+media_eval_df = "datasets/processed/media_eval_entities.csv"
+
+clip_text_embeddings_path="src/embeddings/clip_text_embeddings/text_embeddings.pkl"
+clip_title_embeddings_path="src/embeddings/clip_title_embeddings/title_embeddings.pkl"
+
+bert_title_embeddings_path="src/embeddings/bert_title_embeddings/title_embeddings.pkl"
+bert_text_embeddings_path="src/embeddings/bert_text_embeddings/text_embeddings.pkl"
+
+clip_img_title_embeddings_path="src/embeddings/clip_img_title_embeddings/image_embeddings.pkl"
+clip_img_text_embeddings_path="src/embeddings/clip_img_text_embeddings/image_text_embeddings.pkl"
+
+resnet_img_text_embeddings_path="src/embeddings/resnet_img_text_embeddings/image_text_embeddings.pkl"
+resnet_img_title_embeddings_path="src/embeddings/resnet_img_title_embeddings/image_title_embeddings.pkl"
+
+# For Media Eval Dataset
+media_eval_bert_title_train_embeddings_path="src/embeddings/media_eval_bert_title_embeddings/title_embeddings_train.pkl"
+media_eval_bert_title_test_embeddings_path="src/embeddings/media_eval_bert_title_embeddings/title_embeddings_test.pkl"
+media_eval_bert_title_embedding_path="src/embeddings/media_eval_bert_title_embeddings/title_embeddings.pkl"
+
+media_eval_clip_title_train_embedding_path="src/embeddings/media_eval_clip_title_embeddings/title_embeddings_train.pkl"
+media_eval_clip_title_test_embedding_path="src/embeddings/media_eval_clip_title_embeddings/title_embeddings_test.pkl"
+media_eval_clip_title_embedding_path="src/embeddings/media_eval_clip_title_embeddings/title_embeddings.pkl"
+
+media_eval_clip_img_title_train_embeddings_path="src/embeddings/media_eval_clip_img_title_embeddings/image_title_embeddings_train.pkl"
+media_eval_clip_img_title_test_embeddings_path="src/embeddings/media_eval_clip_img_title_embeddings/image_title_embeddings_test.pkl"
+media_eval_clip_img_title_embedding_path="src/embeddings/media_eval_clip_img_title_embeddings/image_title_embeddings.pkl"
+
+media_eval_resnet_img_title_train_embeddings_path="src/embeddings/media_eval_resnet_img_title_embeddings/image_title_embeddings_train.pkl"
+media_eval_resnet_img_title_test_embeddings_path="src/embeddings/media_eval_resnet_img_title_embeddings/image_title_embeddings_test.pkl"
+media_eval_resnet_img_title_embedding_path="src/embeddings/media_eval_resnet_img_title_embeddings/image_title_embeddings.pkl"
+
+
+text_json_path_1="reference_text/all_texts_1500.json"
+text_json_path_2="reference_text/all_texts_3950.json"
+image_dir = "media_eval_reference_images" # or "reference_images" for all_data dataset

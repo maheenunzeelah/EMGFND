@@ -1,8 +1,12 @@
+import ast
 import os
 from PIL import Image as PILImage
+import config
 import torch
 from pipelines.get_embeddings import get_embeddings
 from utils.image_utils import get_pil_image_cached
+import pandas as pd
+from typing import List, Set, Tuple
 
 def save_images_from_batch(image_lists, indices_list, output_dir):
     """
@@ -17,7 +21,6 @@ def save_images_from_batch(image_lists, indices_list, output_dir):
 
     for i, (row_index, images) in enumerate(zip(indices_list, image_lists)):
         for j, img in enumerate(images):
-            print(row_index, "row_index")
             filename = f"node_{row_index}_{j}.jpg"
             filepath = os.path.join(output_dir, filename)
             img.save(filepath)
@@ -98,8 +101,107 @@ def process_img_embeddings_batch(all_img, df, batch_df, IMG_PATH, model):
             print(f"Row {i}: processed {len(valid_images)} images")
         else:
             print(f"Row {i}: no valid images")
-            random_emb = torch.randn(1, 768)
+            random_emb = torch.randn(1, config.image_embed_size)  # Use config.image_embed_size
             random_emb = random_emb / random_emb.norm(dim=-1, keepdim=True)
             all_embeddings.append(random_emb)  # Append a random embedding if no valid images
     
     return all_embeddings
+
+def extract_hashtags_from_df(df: pd.DataFrame, hashtag_column: str = 'hashtag') -> Set[str]:
+    """
+    Extract unique hashtags from dataframe, removing # symbol and filtering empty arrays.
+    
+    Args:
+        df: DataFrame containing hashtag column
+        hashtag_column: Name of the column containing hashtag arrays
+    
+    Returns:
+        Set of unique hashtags without # symbol
+    """
+    all_hashtags = set()
+
+    for _, row in df.iterrows():
+        hashtags = row[hashtag_column]
+
+        # Skip if NaN or empty string
+        if pd.isna(hashtags) or hashtags.strip() == '':
+            continue
+
+        try:
+            # Convert string representation of list to actual list
+            hashtags_list = ast.literal_eval(hashtags)
+        except (ValueError, SyntaxError):
+            continue  # Skip rows that don't parse properly
+
+        for hashtag in hashtags_list:
+            if hashtag and isinstance(hashtag, str):
+                print(hashtag, "hashtag")
+                clean_hashtag = hashtag.lstrip('#')
+                if clean_hashtag:
+                    all_hashtags.add(clean_hashtag)
+    
+    return all_hashtags
+
+def check_hashtag_image_exists(hashtag: str, image_dir: str) -> bool:
+    """
+    Check if image already exists for a given hashtag.
+    
+    Args:
+        hashtag: Hashtag name (without #)
+        image_dir: Directory where images are stored
+    
+    Returns:
+        True if image exists, False otherwise
+    """
+    # Common image extensions
+    extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+    
+    for ext in extensions:
+        image_path = os.path.join(image_dir, f"{hashtag}{ext}")
+        if os.path.exists(image_path):
+            return True
+    
+    return False
+
+def get_missing_hashtags(hashtags: Set[str], image_dir: str) -> List[str]:
+    """
+    Get list of hashtags that don't have corresponding images.
+    
+    Args:
+        hashtags: Set of hashtags to check
+        image_dir: Directory where images are stored
+    
+    Returns:
+        List of hashtags missing images
+    """
+    missing_hashtags = []
+    
+    for hashtag in hashtags:
+        if not check_hashtag_image_exists(hashtag, image_dir):
+            missing_hashtags.append(hashtag)
+    
+    return missing_hashtags
+
+def save_hashtag_images(images, hashtags: List[str], image_dir: str, image_format: str = 'png'):
+    """
+    Save images for hashtags in the specified directory.
+    
+    Args:
+        images: List of image data from run_async_batch_analysis
+        hashtags: List of hashtags corresponding to images
+        image_dir: Directory to save images
+        image_format: Image format (default: 'png')
+    """
+
+    os.makedirs(image_dir, exist_ok=True)
+     
+    for i, (image_data, hashtag) in enumerate(zip(images, hashtags)):
+        print(image_data,hashtag, "image_data, hashtag")
+        if image_data is not None:
+            image_path = os.path.join(image_dir, f"{hashtag}.jpg")
+            image_data.save(image_path)
+
+            
+        #     print(f"Saved image for hashtag: {hashtag}")
+        # else:
+        #     print(f"No image data for hashtag: {hashtag}")

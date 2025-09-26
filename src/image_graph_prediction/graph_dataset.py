@@ -1,5 +1,6 @@
 #%%
 import os
+import config
 import numpy as np
 import pandas as pd
 import torch
@@ -16,8 +17,8 @@ class MultimodalGraphDataset(Dataset):
         
         Args:
             df (pd.DataFrame): Main dataframe with labels and indices
-            img_embeddings (list): List of image embedding tensors with shape [n_objects, 2048]
-            text_embeddings (list): List of text embedding tensors with shape [n_objects, 768]
+            img_embeddings (list): List of image embedding tensors 
+            text_embeddings (list): List of text embedding tensors
             transform: Optional transform to be applied on a sample
             pre_transform: Optional pre-transform to be applied on a sample
         """
@@ -27,11 +28,8 @@ class MultimodalGraphDataset(Dataset):
         self.img_embeddings = img_embeddings
         self.text_embeddings = text_embeddings
         
-        # Target dimension for consistency
-        self.target_dim = 768
-        
-        # Projection for image embeddings (2048 -> 768)
-        self.img_proj = nn.Linear(768, 768)
+        # Projection for image embeddings 
+        self.img_proj = nn.Linear(config.image_embed_size, 768)
         
         # Process embeddings once during initialization
         self._process_embeddings()
@@ -45,11 +43,12 @@ class MultimodalGraphDataset(Dataset):
             # Convert to tensor if not already
             text_emb = torch.tensor(self.text_embeddings[i], dtype=torch.float32) if not isinstance(self.text_embeddings[i], torch.Tensor) else self.text_embeddings[i].float()
             img_emb = torch.tensor(self.img_embeddings[i], dtype=torch.float32) if not isinstance(self.img_embeddings[i], torch.Tensor) else self.img_embeddings[i].float()
-
-            # Projecting image embeddings: [n_objects, 2048] -> [n_objects, 768]
-           
-            img_emb_processed = self.img_proj(img_emb)
             
+
+                # Fallback if img_emb is empty
+            if img_emb.numel() == 0 or img_emb.dim() == 0:
+                img_emb = torch.randn(1, config.image_embed_size)  # random 2048 or 4096 dim
+            img_emb_processed = self.img_proj(img_emb)
             self.processed_text_embeddings.append(text_emb)
             self.processed_img_embeddings.append(img_emb_processed)
 
@@ -67,8 +66,8 @@ class MultimodalGraphDataset(Dataset):
             torch_geometric.data.Data: Graph data object
         """
         # Get processed embeddings for this sample
-        text_emb = self.processed_text_embeddings[idx]  # Shape: [n_text_objects, 768]
-        img_emb = self.processed_img_embeddings[idx]    # Shape: [n_img_objects, 768]
+        text_emb = self.processed_text_embeddings[idx]  
+        img_emb = self.processed_img_embeddings[idx]    
         # print(img_emb.shape)
         # Get the number of objects for each modality
         n_text_objects = text_emb.shape[0]

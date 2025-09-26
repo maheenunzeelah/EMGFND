@@ -1,28 +1,30 @@
 ## Importing libraries
-from image_graph_prediction.config import Config
+from image_graph_prediction.model_config import Config
 from image_graph_prediction.model import PGATClassifier
-from image_graph_prediction.utils import set_up_multimodal_dataset
+from image_graph_prediction.utils import set_up_media_eval_dataset, set_up_multimodal_dataset
 import numpy as np
-import pandas as pd
+
 import math
-import os
+
 
 import torch
 from torch import nn
-import torch.nn.functional as F
+
 from torch.optim import AdamW
-from torch_geometric.data import Data, Dataset
+
 from torch_geometric.loader import DataLoader
 from torch.utils.data import WeightedRandomSampler
-from sklearn.model_selection import train_test_split
+
 from collections import Counter
 
-import torchmetrics
-from torchmetrics import Accuracy, Precision, Recall, F1Score
+
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 
 from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
+import matplotlib.pyplot as plt
+from image_graph_prediction.utils import plot_acc_graph, plot_loss_graph
+
 import wandb
 
 # Initialize wandb
@@ -31,6 +33,117 @@ wandb.init(project="multimodal-graph-classification", entity="", name="multimoda
 # =====================================================
 # CLASS IMBALANCE HANDLING SOLUTIONS
 # =====================================================
+class AUCMetrics:
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.predictions = []
+        self.targets = []
+    
+    def update(self, preds, targets):
+        """Update with batch predictions and targets"""
+        if torch.is_tensor(preds):
+            # Apply sigmoid if not already applied
+            if preds.min() < 0 or preds.max() > 1:
+                preds = torch.sigmoid(preds)
+            preds = preds.detach().cpu().numpy()
+        if torch.is_tensor(targets):
+            targets = targets.detach().cpu().numpy()
+        
+        self.predictions.extend(preds.flatten())
+        self.targets.extend(targets.flatten())
+    
+    def compute_metrics(self):
+        """Compute all AUC-related metrics"""
+        if len(self.predictions) == 0:
+            return {}
+        
+        preds = np.array(self.predictions)
+        targets = np.array(self.targets)
+        
+        # ROC AUC
+        try:
+            roc_auc = roc_auc_score(targets, preds)
+        except ValueError:
+            roc_auc = 0.5  # If only one class present
+        
+        # Precision-Recall AUC
+        try:
+            precision, recall, _ = precision_recall_curve(targets, preds)
+            pr_auc = auc(recall, precision)
+        except ValueError:
+            pr_auc = 0.0
+        
+        # ROC Curve data for plotting
+        try:
+            fpr, tpr, _ = roc_curve(targets, preds)
+            roc_data = (fpr, tpr)
+        except ValueError:
+            roc_data = None
+        
+        # PR Curve data for plotting
+        try:
+            precision, recall, _ = precision_recall_curve(targets, preds)
+            pr_data = (precision, recall)
+        except ValueError:
+            pr_data = None
+        
+        return {
+            'roc_auc': roc_auc,
+            'pr_auc': pr_auc,
+            'roc_data': roc_data,
+            'pr_data': pr_data
+        }
+
+def log_auc_to_wandb(metrics_dict, epoch, phase='train'):
+    """Log AUC metrics to wandb with custom plots"""
+    
+    # Log scalar metrics
+    wandb.log({
+        f'{phase}/roc_auc': metrics_dict['roc_auc'],
+        f'{phase}/pr_auc': metrics_dict['pr_auc'],
+        'epoch': epoch
+    })
+    
+    # Create and log ROC curve plot
+    if metrics_dict['roc_data'] is not None:
+        fpr, tpr = metrics_dict['roc_data']
+        
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, 
+                label=f'ROC curve (AUC = {metrics_dict["roc_auc"]:.3f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'{phase.capitalize()} ROC Curve - Epoch {epoch}')
+        plt.legend(loc="lower right")
+        plt.grid(True, alpha=0.3)
+        
+        # Log to wandb
+        wandb.log({f'{phase}/roc_curve': wandb.Image(plt)})
+        plt.close()
+    
+    # Create and log Precision-Recall curve
+    if metrics_dict['pr_data'] is not None:
+        precision, recall = metrics_dict['pr_data']
+        
+        plt.figure(figsize=(8, 6))
+        plt.plot(recall, precision, color='blue', lw=2,
+                label=f'PR curve (AUC = {metrics_dict["pr_auc"]:.3f})')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title(f'{phase.capitalize()} Precision-Recall Curve - Epoch {epoch}')
+        plt.legend(loc="lower left")
+        plt.grid(True, alpha=0.3)
+        
+        # Log to wandb
+        wandb.log({f'{phase}/pr_curve': wandb.Image(plt)})
+        plt.close()
 
 def calculate_class_weights(dataset):
     """Calculate class weights for imbalanced dataset"""
@@ -97,7 +210,7 @@ def create_weighted_sampler(dataset):
 
 class FocalLoss(nn.Module):
     """Focal Loss for addressing class imbalance"""
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -221,6 +334,9 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
     train_prec = BinaryPrecision().to(device)
     train_rec = BinaryRecall().to(device)
     train_f1 = BinaryF1Score().to(device)
+
+    # Initialize AUC metrics
+    auc_metrics = AUCMetrics()
     
     # Track class-specific predictions
     all_preds = []
@@ -296,6 +412,9 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
             with torch.no_grad():
                 preds = torch.sigmoid(out.detach()).cpu()
                 targets_cpu = targets.detach().cpu()
+
+                 # Update AUC metrics (use raw probabilities, not binary)
+                auc_metrics.update(preds, targets_cpu)
                 
                 preds_binary = (preds > optimal_threshold).float()
                 
@@ -373,6 +492,9 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
             class_1_recall = np.mean(all_preds[class_1_mask] == 1)  # True positives
         else:
             class_1_acc = class_1_recall = 0.0
+
+         # Compute AUC metrics
+        auc_results = auc_metrics.compute_metrics()
         
         train_report = {
             "accuracy": train_acc.compute().item(),
@@ -382,23 +504,28 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
             "class_0_accuracy": class_0_acc,
             "class_1_accuracy": class_1_acc,
             "class_0_recall": class_0_recall,
-            "class_1_recall": class_1_recall
+            "class_1_recall": class_1_recall,
+            "roc_auc": auc_results.get('roc_auc', 0.0),
+            "pr_auc": auc_results.get('pr_auc', 0.0)
         }
         avg_loss = total_loss / valid_batches
         
-        print(f"\nDetailed Training Metrics:")
-        print(f"Real News (0) Accuracy: {class_0_acc:.4f}, Recall: {class_0_recall:.4f}")
-        print(f"Fake News (1) Accuracy: {class_1_acc:.4f}, Recall: {class_1_recall:.4f}")
+        # print(f"\nDetailed Training Metrics:")
+        # print(f"Real News (0) Accuracy: {class_0_acc:.4f}, Recall: {class_0_recall:.4f}")
+        # print(f"Fake News (1) Accuracy: {class_1_acc:.4f}, Recall: {class_1_recall:.4f}")
+        # print(f"ROC AUC: {auc_results.get('roc_auc', 0.0):.4f}, PR AUC: {auc_results.get('pr_auc', 0.0):.4f}")
         
     else:
         train_report = {
             "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1_score": 0.0,
             "class_0_accuracy": 0.0, "class_1_accuracy": 0.0,
-            "class_0_recall": 0.0, "class_1_recall": 0.0
+            "class_0_recall": 0.0, "class_1_recall": 0.0,
+            "roc_auc": 0.0, "pr_auc": 0.0
         }
         avg_loss = float('inf')
+        auc_results = {}
     
-    return avg_loss, train_report
+    return avg_loss, train_report, auc_results
 
 # =====================================================
 # BALANCED EVALUATION FUNCTION
@@ -415,6 +542,9 @@ def eval_func_balanced(model, dataloader, device, epoch, criterion, optimal_thre
     val_prec = BinaryPrecision().to(device)
     val_rec = BinaryRecall().to(device)
     val_f1 = BinaryF1Score().to(device)
+
+    # Initialize AUC metrics
+    auc_metrics = AUCMetrics()
     
     all_preds = []
     all_targets = []
@@ -457,6 +587,9 @@ def eval_func_balanced(model, dataloader, device, epoch, criterion, optimal_thre
                     # Calculate metrics with optimal threshold
                     preds = torch.sigmoid(out).cpu()
                     targets_cpu = targets.cpu()
+
+                    # Update AUC metrics (use raw probabilities, not binary)
+                    auc_metrics.update(preds, targets_cpu)
                     
                     preds = torch.clamp(preds, 0.0, 1.0)
                     preds_binary = (preds > optimal_threshold).long()
@@ -480,25 +613,77 @@ def eval_func_balanced(model, dataloader, device, epoch, criterion, optimal_thre
         rec = val_rec.compute().item()
         f1_score = val_f1.compute().item()
         avg_loss = total_loss / valid_batches
+        
     else:
         acc = prec = rec = f1_score = 0.0
         avg_loss = float('inf')
+
+    auc_results = auc_metrics.compute_metrics()
+    
+    # Calculate per-class metrics
+    class_0_acc = class_1_acc = 0.0
+    class_0_prec = class_1_prec = 0.0
+    class_0_rec = class_1_rec = 0.0
+    class_0_f1 = class_1_f1 = 0.0
+    
+    if all_preds:
+        all_preds_arr = torch.cat(all_preds).numpy()
+        all_targets_arr = torch.cat(all_targets).numpy()
+        
+        # Calculate confusion matrix components
+        tp = np.sum((all_preds_arr == 1) & (all_targets_arr == 1))  # True Positives
+        tn = np.sum((all_preds_arr == 0) & (all_targets_arr == 0))  # True Negatives
+        fp = np.sum((all_preds_arr == 1) & (all_targets_arr == 0))  # False Positives
+        fn = np.sum((all_preds_arr == 0) & (all_targets_arr == 1))  # False Negatives
+        
+       # ✅ treat class 0 (real) as “positive” for its own metrics
+        class_0_total = tn + fp            # all true real + misclassified real
+        class_0_predicted = tn + fn        # everything predicted real
+
+        if class_0_total > 0:
+            class_0_acc  = tn / class_0_total
+            class_0_rec  = tn / class_0_total   # recall for real
+        if class_0_predicted > 0:
+            class_0_prec = tn / (tn + fn)       # precision for real
+        if class_0_prec + class_0_rec > 0:
+            class_0_f1   = 2 * class_0_prec * class_0_rec / (class_0_prec + class_0_rec)
+        
+        # Class 1 metrics (considering class 1 as positive)
+        class_1_total = tp + fn  # Total actual class 1 samples
+        class_1_predicted = tp + fp  # Total predicted class 1 samples
+        
+        if class_1_total > 0:
+            class_1_acc = tp / class_1_total  # True Positive Rate (same as recall)
+            class_1_rec = tp / class_1_total  # Recall for class 1
+        
+        if class_1_predicted > 0:
+            class_1_prec = tp / (tp + fp)  # Precision for class 1
+        
+        if class_1_prec + class_1_rec > 0:
+            class_1_f1 = 2 * (class_1_prec * class_1_rec) / (class_1_prec + class_1_rec)
+            
+    else:
+        all_preds_arr = np.array([])
+        all_targets_arr = np.array([])
     
     report = {
         "accuracy": acc,
         "precision": prec,
         "recall": rec,
-        "f1_score": f1_score
+        "f1_score": f1_score,
+        "class_0_accuracy": class_0_acc,
+        "class_0_precision": class_0_prec,
+        "class_0_recall": class_0_rec,
+        "class_0_f1_score": class_0_f1,
+        "class_1_accuracy": class_1_acc,
+        "class_1_precision": class_1_prec,
+        "class_1_recall": class_1_rec,
+        "class_1_f1_score": class_1_f1,
+        "roc_auc": auc_results.get('roc_auc', 0.0),
+        "pr_auc": auc_results.get('pr_auc', 0.0),
     }
     
-    if all_preds:
-        all_preds = torch.cat(all_preds).numpy()
-        all_targets = torch.cat(all_targets).numpy()
-    else:
-        all_preds = np.array([])
-        all_targets = np.array([])
-        
-    return avg_loss, report, acc, prec, rec, f1_score, all_targets, all_preds
+    return avg_loss, report, acc, prec, rec, f1_score, all_targets_arr, all_preds_arr, auc_results
 
 # =====================================================
 # MAIN TRAINING CODE
@@ -516,7 +701,7 @@ if __name__ == '__main__':
     if dataset_name == "multimodal":  
         dataset_train, dataset_val, dataset_test = set_up_multimodal_dataset()
     else:
-        print("No Data")
+        dataset_train, dataset_val, dataset_test = set_up_media_eval_dataset()
     
     # Print class distribution
     print("\n=== CLASS DISTRIBUTION ANALYSIS ===")
@@ -543,7 +728,10 @@ if __name__ == '__main__':
     # criterion = get_weighted_loss_function(dataset_train, device)
     
     # Option B: Focal Loss (alternative)
-    criterion = FocalLoss(alpha=0.25, gamma=2.0)
+    # fake_weight = 0.25            
+    # real_weight = 0.75
+    criterion = FocalLoss(alpha=0.2, gamma=2.0)
+    # criterion = FocalLoss(alpha=None, gamma=4.0)
     # print("Using Focal Loss")
     
     ## Setup the dataloaders with weighted sampler
@@ -649,7 +837,7 @@ if __name__ == '__main__':
         optimizer = AdamW(
             gnn_model.parameters(), 
             lr=config.lr ,
-            weight_decay=1e-4,
+            weight_decay=config.weight_decay,
             # eps=1e-8
         )
         return optimizer
@@ -662,6 +850,11 @@ if __name__ == '__main__':
     epochs_no_improve = 0
     early_stopping_patience = 20
     early_stop = False
+    train_losses = []
+    val_losses = []
+    train_accs = []
+    val_accs = []
+
     
     print("\n=== STARTING BALANCED TRAINING ===")
     
@@ -673,7 +866,7 @@ if __name__ == '__main__':
         
         try:
             ## Training Loop with balanced approach
-            train_loss, train_report = train_func_epoch_balanced(
+            train_loss, train_report, train_auc_results = train_func_epoch_balanced(
                 epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, criterion, optimal_threshold
             )
             consecutive_errors = 0  # Reset error counter on success
@@ -692,9 +885,15 @@ if __name__ == '__main__':
                 continue
 
         ## Validation loop with balanced evaluation
-        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds = eval_func_balanced(
+        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds, val_auc_results= eval_func_balanced(
             gnn_model, dataloader_val, device, epoch+1, criterion, optimal_threshold
         )
+
+        # Log AUC curves to wandb
+        if train_auc_results:
+            log_auc_to_wandb(train_auc_results, epoch+1, 'train')
+        if val_auc_results:
+            log_auc_to_wandb(val_auc_results, epoch+1, 'val')
         
         # Print confusion matrix if we have predictions
         if len(val_labels) > 0 and len(val_preds) > 0:
@@ -709,7 +908,7 @@ if __name__ == '__main__':
         print()
         print("Validation Report:")
         print(f"Accuracy: {report['accuracy']:.4f} | Precision: {report['precision']:.4f} | Recall: {report['recall']:.4f} | F1: {report['f1_score']:.4f}")
-        
+        # print(f"ROC AUC: {report['roc_auc']:.4f} | PR AUC: {report['pr_auc']:.4f}")
         # Find optimal threshold every few epochs
         if epoch > 0 and epoch % 3 == 0:  # Update threshold every 3 epochs
             try:
@@ -734,7 +933,15 @@ if __name__ == '__main__':
                 "val-rec": rec, 
                 "val-f1score": f1_score, 
                 "val-acc": report["accuracy"],
-                "optimal_threshold": optimal_threshold
+                # "val-roc-auc": report["roc_auc"],
+                # "val-pr-auc": report["pr_auc"],
+                "optimal_threshold": optimal_threshold,
+                "Loss/Train": train_loss,
+                "Loss/Validation": val_loss,
+                "Accuracy/Train": train_report["accuracy"],
+                "Accuracy/Validation": report["accuracy"],
+                "epoch": epoch + 1,
+                
             })
         
         print(f"\n----------------------------------------------------------------------------")
@@ -764,11 +971,20 @@ if __name__ == '__main__':
                 'epoch': epoch,
                 'val_loss': val_loss,
                 'class_weights': calculate_class_weights(dataset_train)
-            }, "best_multimodal_model_balanced.pth")
+            }, config.best_model_path)
             print(f"New best model saved with validation loss: {val_loss:.4f}")
+        
+      
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        train_accs.append(train_report["accuracy"])
+        val_accs.append(report["accuracy"])
+
+
 
     print("Training completed!")
-    
+
     # Final threshold optimization
     print("\n=== FINAL THRESHOLD OPTIMIZATION ===")
     try:
@@ -779,11 +995,69 @@ if __name__ == '__main__':
         torch.save({
             'model_state_dict': gnn_model.state_dict(),
             'optimal_threshold': final_threshold,
-            'final_epoch': config.epochs,
+            'epoch': epoch,
             'class_weights': calculate_class_weights(dataset_train)
-        }, "final_multimodal_model_balanced.pth")
+        }, config.best_model_final_path)
         
     except Exception as e:
         print(f"Could not perform final threshold optimization: {e}")
     
+    
+    print("\n=== EVALUATING ON TEST DATASET ===")
+
+    # Initialize torchmetrics on the correct device
+    test_accuracy = BinaryAccuracy().to(device)
+    test_precision = BinaryPrecision().to(device)
+    test_recall = BinaryRecall().to(device)
+    test_f1 = BinaryF1Score().to(device)
+
+    # Load the best model
+    try:
+        best_model_path = config.best_model_final_path
+        checkpoint = torch.load(best_model_path, map_location=device,weights_only=False)
+        
+        # Load model state
+        gnn_model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Use the optimal threshold from training
+        if 'optimal_threshold' in checkpoint:
+            test_threshold = checkpoint['optimal_threshold']
+            print(f"Using optimal threshold from training: {test_threshold:.3f}")
+        else:
+            test_threshold = final_threshold if 'final_threshold' in locals() else 0.5
+            print(f"Using threshold: {test_threshold:.3f}")
+        
+        print(f"Loaded best model from epoch {checkpoint.get('epoch', 'unknown')}")
+        
+    except FileNotFoundError:
+        print("Best model not found, using current model state")
+        test_threshold = final_threshold if 'final_threshold' in locals() else optimal_threshold
+
+    # Evaluate on test set
+    test_loss, test_report, test_acc, test_prec, test_rec, test_f1, test_labels, test_preds , test_auc_results= eval_func_balanced(
+        gnn_model, dataloader_test, device, 0, criterion, test_threshold
+    )
+
+
+    if len(test_labels) > 0 and len(test_preds) > 0:
+            print("Confusion Matrix:")
+            print(confusion_matrix(test_labels, test_preds))
+    print(f"\nTest Loss: {test_loss:.4f}")
+    print(f"Test Accuracy: {test_acc:.4f} | Precision: {test_prec:.4f} | Recall: {test_rec:.4f} | F1: {test_f1:.4f}")
+    print(
+        f"Class 0 (Real) Acc: {test_report['class_0_accuracy']:.4f} | "
+        f"Class 1 (Fake) Acc: {test_report['class_1_accuracy']:.4f} | "
+        f"Class 0 (Real) Precision: {test_report['class_0_precision']:.4f} | "
+        f"Class 1 (Fake) Precision: {test_report['class_1_precision']:.4f} | "
+        f"Class 0 (Real) Recall: {test_report['class_0_recall']:.4f} | "
+        f"Class 1 (Fake) Recall: {test_report['class_1_recall']:.4f} | "
+        f"Class 0 (Real) F1: {test_report['class_0_f1_score']:.4f} | "
+        f"Class 1 (Fake) F1: {test_report['class_1_f1_score']:.4f} | "
+        f"ROC AUC: {test_report['roc_auc']:.4f} | PR AUC: {test_report['pr_auc']:.4f}"
+    )
+   
+
     wandb.finish()
+
+    plot_loss_graph(train_losses, val_losses)
+    plot_acc_graph(train_accs, val_accs)

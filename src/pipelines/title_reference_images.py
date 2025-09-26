@@ -1,40 +1,104 @@
 # %%
 import asyncio
-import pickle
 import aiohttp
 import time
-from utils.reference_images import extract_hashtags_from_df, get_batch, get_missing_hashtags, images_exist_for_index, load_images_for_batch, process_img_embeddings_batch, save_hashtag_images, save_images_from_batch
+import config
+from pipelines.pipeline_utils import clean_entity_title_for_filename
+from utils.reference_images import  get_batch
 import utils.tagMe as tagme
-import requests
-from pathlib import Path
 import os
 from dotenv import load_dotenv
 import pandas as pd
 import json
 import hashlib
-import numpy as np
 import logging
-import torch
-import concurrent.futures
 from PIL import Image as PILImage
 import io
 from tqdm import tqdm 
-
+import ast
 # %%
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-IMG_PATH = "allData_images"
 
 # Global caches
 annotation_cache = {}  # Cache for TagMe API responses
 image_cache = []  # Your existing image cache
+entity_image_cache = {}  # Cache for entity title -> image mapping
+saved_entity_titles = set()  # Track which entity titles have been saved
 
 # %%
 load_dotenv(override=True)
 GCUBE_TOKEN = os.getenv('TAG_ME_TOKEN')
 
 # %%
+
+def save_entity_image(entity_title, image, image_dir):
+    """Save image with entity title as filename"""
+    if not image:
+        return None
+    
+    # Create directory if it doesn't exist
+    os.makedirs(image_dir, exist_ok=True)
+    
+    # Clean entity title for filename
+    cleaned_title = clean_entity_title_for_filename(entity_title)
+    filename = f"{cleaned_title}.jpg"
+    filepath = os.path.join(image_dir, filename)
+    
+    # Save image
+    try:
+        image.save(filepath, 'JPEG', quality=85)
+        logger.info(f"Saved image for entity: {entity_title} -> {filepath}")
+        return filepath
+    except Exception as e:
+        logger.error(f"Error saving image for {entity_title}: {e}")
+        return None
+
+def load_entity_metadata(image_dir):
+    """Load existing entity metadata from JSON file"""
+    metadata_file = os.path.join(image_dir, "entity_metadata.json")
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error loading entity metadata: {e}")
+    return {}
+
+def save_entity_metadata(metadata, image_dir):
+    """Save entity metadata to JSON file"""
+    metadata_file = os.path.join(image_dir, "entity_metadata.json")
+    os.makedirs(image_dir, exist_ok=True)
+    try:
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Saved entity metadata with {len(metadata)} entities")
+    except Exception as e:
+        logger.error(f"Error saving entity metadata: {e}")
+
+def update_dataframe_with_entities(df, row_index, entity_titles):
+    """Update dataframe with entity titles for a specific row"""
+    if 'entity_titles' not in df.columns:
+        # Initialize column with empty lists for all rows
+        df['entity_titles'] = [[] for _ in range(len(df))]
+    
+    # Get current entities for this row
+    current_entities = df.at[row_index, 'entity_titles']
+    
+    # Convert to list if it's not already (handle NaN or other types)
+    if not isinstance(current_entities, list):
+        current_entities = []
+    
+    # Add new entity titles (avoid duplicates)
+    for entity_title in entity_titles:
+        if entity_title not in current_entities:
+            current_entities.append(entity_title)
+    
+    # Use .at for single value assignment
+    df.at[row_index, 'entity_titles'] = current_entities
+    return df
+
 def get_or_create_event_loop():
     """Get existing event loop or create new one if needed"""
     try:
@@ -146,8 +210,12 @@ class AsyncWikipediaClient:
         connector = aiohttp.TCPConnector(limit=30, limit_per_host=15)
         timeout = aiohttp.ClientTimeout(total=60, connect=20)
         self.session = aiohttp.ClientSession(
-            connector=connector, 
-            timeout=timeout
+            connector=connector,
+            timeout=timeout,
+            headers={
+                # <-- Add a descriptive, contactable UA per Wikimedia policy
+               'User-Agent': 'AsyncTagMeClient/1.0'
+            }
         )
         return self
         
@@ -173,8 +241,10 @@ class AsyncWikipediaClient:
                     'pilimit': 1,
                     'wbptterms': 'description'
                 }
+             
                 
                 async with self.session.get(api_url, params=params) as response:
+              
                     if response.status != 200:
                         return None
                         
@@ -259,47 +329,48 @@ class AsyncWikipediaClient:
             pass
         return None
 
-async def get_images_batch_async(entity_titles, wiki_client):
-    """Async batch image retrieval"""
-    if not entity_titles:
-        return []
+async def get_image_for_entity_async(entity_title, wiki_client, image_dir):
+    """Get image for a specific entity, checking cache first"""
+    global entity_image_cache, saved_entity_titles
     
-    images = []
-    uncached_titles = []
     
-    # Check cache first
-    for title in entity_titles:
-        cached = next((item['img'] for item in image_cache if item['query'] == title), None)
-        if cached:
-            logger.debug(f"Cache hit for image: {title}")
-            images.append(cached)
-        else:
-            uncached_titles.append(title)
+    # Check if already saved
+    if entity_title in saved_entity_titles:
+        logger.debug(f"Entity {entity_title} already saved, skipping")
+        return None
     
-    # Fetch uncached images concurrently
-    if uncached_titles:
-        logger.info(f"Fetching {len(uncached_titles)} uncached images")
-        
-        tasks = [
-            wiki_client.get_entity_image_async(title, return_pil=True) 
-            for title in uncached_titles
-        ]
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for title, result in zip(uncached_titles, results):
-            if isinstance(result, Exception):
-                logger.error(f"Error fetching image for {title}: {result}")
-            elif result:
-                images.append(result)
-                image_cache.append({'query': title, 'img': result})
-                logger.debug(f"✓ Fetched image: {title}")
+    # Check memory cache
+    if entity_title in entity_image_cache:
+        logger.debug(f"Memory cache hit for entity: {entity_title}")
+        return entity_image_cache[entity_title]
     
-    return images
+    # Check if file exists on disk
+    cleaned_title = clean_entity_title_for_filename(entity_title)
+    filepath = os.path.join(image_dir, f"{cleaned_title}.jpg")
+    
+    if os.path.exists(filepath):
+        logger.debug(f"File exists for entity: {entity_title}")
+        saved_entity_titles.add(entity_title)
+        return None
+    
+    # Fetch image
+    logger.info(f"Fetching new image for entity: {entity_title}")
+    image = await wiki_client.get_entity_image_async(entity_title, return_pil=True)
+    
+    if image:
+        # Save image
+        saved_path = save_entity_image(entity_title, image, image_dir)
+        print(f"Saved path: {saved_path}")
+        if saved_path:
+            entity_image_cache[entity_title] = image
+            saved_entity_titles.add(entity_title)
+            logger.info(f"Successfully saved image for: {entity_title}")
+            return image
+    
+    return None
 
-async def extract_top_entities_async(annotations, max_count, linked_name_cache, 
-                                   global_seen_entities, wiki_client):
-    """Async version of extract_top_entities, ensures at least 2 images if possible"""
+async def extract_top_entities_async(annotations, max_count, row_index, image_dir, wiki_client):
+    """Extract top entities and save images, return entity titles"""
     if not annotations:
         return []
 
@@ -307,9 +378,6 @@ async def extract_top_entities_async(annotations, max_count, linked_name_cache,
     min_score_threshold = 0.1
    
     for ann in annotations.get_annotations(min_score_threshold):
-        print(ann, "annotations in extract_top_entities_async")
-        if ann.entity_title in global_seen_entities:
-            continue
         entity_scores.append({
             "score": ann.score,
             "original": ann.mention,
@@ -317,73 +385,67 @@ async def extract_top_entities_async(annotations, max_count, linked_name_cache,
             "ann": ann
         })
 
-    # Sort and take top entities
+    # Sort by score
     sorted_entities = sorted(entity_scores, key=lambda x: x["score"], reverse=True)
-    images = []
-    used_titles = set()
-    i = 0
+    
+    # Process entities and save images
+    entity_titles = []
+    images_saved = 0
+    
+    for entity in sorted_entities[:max_count]:
+        entity_title = clean_entity_title_for_filename(entity["linked_title"])
+        entity_titles.append(entity_title)
+        
+        # Try to get/save image
+        image = await get_image_for_entity_async(entity_title, wiki_client, image_dir)
+        if image:
+            images_saved += 1
+    logger.info(f"Row {row_index}: Found {len(entity_titles)} entities, saved {images_saved} new images")
+    return entity_titles
 
-    # Try to fetch images until at least 2 are found or entities are exhausted
-    while len(images) < 2 and i < len(sorted_entities):
-        # Try next batch of up to max_count entities
-        batch_entities = sorted_entities[i:i+max_count]
-        entity_titles = [e["linked_title"] for e in batch_entities if e["linked_title"] not in used_titles]
-        if not entity_titles:
-            break
-        new_images = await get_images_batch_async(entity_titles, wiki_client)
-        images.extend([img for img in new_images if img is not None])
-        used_titles.update(entity_titles)
-        i += max_count
-
-    # Update caches
-    global_seen_entities.update(used_titles)
-
-    return images[:max_count] 
-
-async def process_single_text_async(text_data, tagme_client, wiki_client):
-    """Async processing of a single text"""
+async def process_single_text_async(text_data, tagme_client, wiki_client, image_dir):
+    """Async processing of a single text with entity tracking"""
     text, index = text_data
-    linked_name_cache = set()
-    entity_dedup_cache = set()  # Local entity deduplication across all texts
     logger.info(f"Processing text {index + 1}")
     
     try:
-        print(text, "text in process_single_text_async")
         # Process the text directly with TagMe
         annotations = await tagme_client.annotate_async(text, f"text_{index}")
-        print(f"Annotations for text {index + 1}: {annotations}")
         
         if annotations:
-            images = await extract_top_entities_async(
-                annotations, 9, linked_name_cache, 
-                entity_dedup_cache, wiki_client
+            entity_titles = await extract_top_entities_async(
+                annotations, 9, index, image_dir, wiki_client
             )
-            logger.info(f"Text {index + 1} completed: {len(images)} images")
-            return images
+            logger.info(f"Text {index + 1} completed: {len(entity_titles)} entities found")
+            return entity_titles
         else:
-            logger.info(f"Text {index + 1} completed: 0 images (no annotations)")
+            logger.info(f"Text {index + 1} completed: no annotations")
             return []
         
     except Exception as e:
         logger.error(f"Error processing text {index + 1}: {e}")
         return []
 
-async def batch_image_analysis_async(texts, gcube_token, max_concurrent_texts=10):
-    """Main async batch processing function"""
-    logger.info("=== ASYNC BATCH IMAGE ANALYSIS ===")
+async def batch_image_analysis_async(texts, indices, df, gcube_token, image_dir, max_concurrent_texts=10):
+    """Main async batch processing function with entity tracking"""
+    logger.info("=== ASYNC BATCH IMAGE ANALYSIS WITH ENTITY TRACKING ===")
     logger.info(f"Processing {len(texts)} texts with max {max_concurrent_texts} concurrent")
-    print(texts, "texts")
+    
+    # Load existing entity metadata
+    entity_metadata = load_entity_metadata(image_dir)
+    global saved_entity_titles
+    saved_entity_titles.update(entity_metadata.keys())
+    
     start_time = time.time()
     
     async with AsyncTagMeClient(gcube_token, max_concurrent=30) as tagme_client, \
                AsyncWikipediaClient(max_concurrent=20) as wiki_client:
         
         # Prepare data
-        text_data = [(text, i) for i, text in enumerate(texts)]
+        text_data = [(text, indices[i]) for i, text in enumerate(texts)]
         
-        # Process in batches to avoid overwhelming the APIs
+        # Process in batches
         batch_size = max_concurrent_texts
-        all_results = [None] * len(texts)  # Pre-allocate to maintain order
         
         with tqdm(total=len(texts), desc="Processing texts") as pbar:
             for i in range(0, len(text_data), batch_size):
@@ -392,39 +454,52 @@ async def batch_image_analysis_async(texts, gcube_token, max_concurrent_texts=10
                 
                 # Create tasks for this batch
                 tasks = [
-                    process_single_text_async(data, tagme_client, wiki_client)
+                    process_single_text_async(data, tagme_client, wiki_client, image_dir)
                     for data in batch
                 ]
                 
                 # Process batch
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                # Store results in correct positions
+                # Update dataframe with entity titles
                 for j, (data, result) in enumerate(zip(batch, batch_results)):
-                    original_index = data[1]
+                    row_index = data[1]
                     if isinstance(result, Exception):
-                        logger.error(f"Error in text {original_index + 1}: {result}")
-                        all_results[original_index] = []
-                    else:
-                        all_results[original_index] = result
-                    pbar.update(1) 
-                # Small delay between batches to be nice to APIs
+                        logger.error(f"Error in row {row_index}: {result}")
+                        result = []
+                    
+                    if result:
+                        df = update_dataframe_with_entities(df, row_index, result)
+                        
+                        # Update metadata
+                        for entity_title in result:
+                            if entity_title not in entity_metadata:
+                                entity_metadata[entity_title] = {
+                                    'filename': f"{clean_entity_title_for_filename(entity_title)}.jpg",
+                                    'rows': []
+                                }
+                            if row_index not in entity_metadata[entity_title]['rows']:
+                                entity_metadata[entity_title]['rows'].append(row_index)
+                    
+                    pbar.update(1)
+                
+                # Small delay between batches
                 if i + batch_size < len(text_data):
                     await asyncio.sleep(1)
     
-    end_time = time.time()
-    total_images = sum(len(result) for result in all_results if result)
+    # Save updated metadata
+    save_entity_metadata(entity_metadata, image_dir)
     
+    end_time = time.time()
     logger.info(f"=== ASYNC PROCESSING COMPLETE ===")
     logger.info(f"Total time: {end_time - start_time:.2f} seconds")
-    logger.info(f"Total images found: {total_images}")
-    logger.info(f"Cache stats - Annotations: {len(annotation_cache)}, Images: {len(image_cache)}")
+    logger.info(f"Total unique entities: {len(entity_metadata)}")
     
-    return all_results
+    return df
 
 
 # FIXED: Event loop compatible wrapper functions
-def run_async_batch_analysis(texts, gcube_token, max_concurrent_texts=20):
+def run_async_batch_analysis(texts, indices, df, gcube_token, image_dir, max_concurrent_texts=20):
     """Wrapper to run async analysis - compatible with existing event loops"""
     try:
         # Try to get existing loop
@@ -433,79 +508,92 @@ def run_async_batch_analysis(texts, gcube_token, max_concurrent_texts=20):
         import nest_asyncio
         nest_asyncio.apply()  # Allows nested event loops
         return asyncio.run(
-            batch_image_analysis_async(texts, gcube_token, max_concurrent_texts)
+            batch_image_analysis_async(texts, indices, df, gcube_token, image_dir, max_concurrent_texts)
         )
     except RuntimeError:
         # No running loop, use asyncio.run normally
         return asyncio.run(
-            batch_image_analysis_async(texts, gcube_token, max_concurrent_texts)
+            batch_image_analysis_async(texts, indices, df, gcube_token, image_dir, max_concurrent_texts)
         )
     except ImportError:
         # nest_asyncio not available, try alternative approach
-        return run_with_new_loop(texts, gcube_token, max_concurrent_texts)
+        return run_with_new_loop(texts, indices, df, gcube_token, image_dir, max_concurrent_texts)
 
-def run_with_new_loop(texts, gcube_token, max_concurrent_texts=20):
+def run_with_new_loop(texts, indices, df, gcube_token, image_dir, max_concurrent_texts=20):
     """Alternative approach using new event loop"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(
-            batch_image_analysis_async(texts, gcube_token, max_concurrent_texts)
+            batch_image_analysis_async(texts, indices, df, gcube_token, image_dir, max_concurrent_texts)
         )
     finally:
         loop.close()
 
-
-
 #%%
-df = pd.read_csv("../../datasets/raw/tweets.txt", delimiter="\t")
-batch_df = get_batch(4,5,df)
-image_dir= "hashtag_images"
-missing_indices = [idx for idx in batch_df.index if  images_exist_for_index(idx, image_dir) != "file exists"]
-texts = batch_df.loc[missing_indices, 'tweetText'].tolist()
-all_imgs = run_async_batch_analysis(texts, GCUBE_TOKEN, max_concurrent_texts=8)
-print(all_imgs, "all_imgs")
-save_images_from_batch(all_imgs, missing_indices, image_dir)
-# Example usage:
-# df = pd.read_csv("datasets/processed/all_data_df_resolved.csv")
-# embedding_df = pd.read_pickle("src/embeddings/clip_img_title_embeddings/image_embeddings_3200.pkl")
-# print(embedding_df.info(), "before appending")
+# Updated usage example
+df = pd.read_csv(config.all_data_path)
+batch_df = get_batch(3000,len(df), df)
+image_dir = config.all_data_reference_images_dir  # Changed directory name to be more descriptive
+
+# Load existing processed data
+try:
+    df_existing = pd.read_csv(config.all_data_title_entities_df)
+except FileNotFoundError:
+    df_existing = pd.DataFrame()  
+
+# Check if all_data_title_entities_df has the entity_titles column
+if 'entity_titles' in df_existing.columns:
+    # Find which indices from batch_df are missing or have empty entity_titles in all_data_title_entities_df
+    missing_indices = []
+    
+    for idx in batch_df.index:
+        # Check if this index exists in all_data_title_entities_df
+
+        if idx in df_existing.index:
+            entity_titles_value = ast.literal_eval(df_existing.at[idx, 'entity_titles'])
+
+            # Check if entity_titles is missing, not a list, or empty
+            if not isinstance(entity_titles_value, list) or len(entity_titles_value) == 0:
+                missing_indices.append(idx)
+        else:
+            # Index doesn't exist in all_data_title_entities_df, so it's missing
+            missing_indices.append(idx)
+else:
+    # all_data_title_entities_df doesn't exist or doesn't have entity_titles column
+    # Process all rows in batch_df
+    missing_indices = batch_df.index.tolist()
+
+texts = batch_df.loc[missing_indices, 'resolved_title'].tolist()
 
 
-# # # === Batch selection ===
-# batch_df = get_batch(3200,len(df),df)
-# # # texts = batch_df['title'].tolist()
+# Process batch
+updated_df = run_async_batch_analysis(
+    texts, missing_indices, batch_df, GCUBE_TOKEN, image_dir, max_concurrent_texts=8
+)
 
-# # # === Check if analysis is needed ===
-# image_dir = "reference_images_from_title"
 
-# # # missing_indices = [idx for idx in batch_df.index if  images_exist_for_index(idx, image_dir) != "file exists"]
+if not df_existing.empty:
+    updated_df = updated_df[~updated_df.index.isin(df_existing.index)]
 
-# # # print(missing_indices)
-# # # if len(missing_indices) > 0:
-# # #     print("Images missing for indices:", missing_indices)
-# # #     texts = batch_df.loc[missing_indices, 'resolved_title'].tolist()
-# # #     all_imgs = run_async_batch_analysis(texts, GCUBE_TOKEN, max_concurrent_texts=8)
-# # #     save_images_from_batch(all_imgs, missing_indices, image_dir)
 
-# # # else:
-# # #     print("All images exist. Skipping run_async_batch_analysis.")
-# all_imgs = load_images_for_batch(batch_df, image_dir)
-# print(f"Loaded {len(all_imgs)} images for batch {batch_df.index.tolist()}")
+combined_df = pd.concat([df_existing, updated_df], ignore_index=True)
 
-# all_embeddings = process_img_embeddings_batch(all_imgs, df, batch_df, IMG_PATH, model="clip")
-# print(f"Processed {len(all_embeddings)} embeddings for batch {batch_df.index.tolist()}")
+combined_df.to_csv(config.all_data_title_entities_df, index=False)
 
-# # Create batch embedding dataframe
-# batch_embedding_df = pd.DataFrame({
-#     "index": batch_df.index,  # preserves mapping to original df
-#     "referenced_image_embeddings": all_embeddings
-# })
-# print(batch_embedding_df.info())
 
-# # Append to the master embedding DataFrame
-# embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
-# print(embedding_df.info())
-# embedding_df.to_pickle("src/embeddings/clip_img_title_embeddings/image_embeddings.pkl")
-# %%
+# Example: Load images for a specific row
+# row_index = combined_df.index[3]
+# batch_df = get_batch(0, 10, combined_df)
+# batch_df.info()
+# images = media_eval_load_images_for_batch(batch_df, image_dir)
+
+# print(f"Loaded {len(images)} images ")
+
+# Example: Show entity titles for a row
+# if 'entity_titles' in combined_df.columns:
+#     entities = combined_df.loc[row_index, 'entity_titles']
+#     print(f"Entity titles for row {row_index}: {entities}")
+
+
 # %%

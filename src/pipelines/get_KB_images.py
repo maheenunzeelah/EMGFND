@@ -1,23 +1,20 @@
 # %%
 import asyncio
-import pickle
+
 import aiohttp
 import time
-from utils.image_utils import  get_pil_image_cached
-from utils.reference_images import get_batch, images_exist_for_index, load_images_for_batch, process_img_embeddings_batch, save_images_from_batch
+
 import utils.tagMe as tagme
-import requests
-from pathlib import Path
+
 import os
 from dotenv import load_dotenv
-import pandas as pd
+
 import spacy
-import json
+
 import hashlib
 import numpy as np
 import logging
-import torch
-import concurrent.futures
+
 from PIL import Image as PILImage
 import io
 from tqdm import tqdm 
@@ -584,19 +581,11 @@ async def run_large_dataset_in_existing_loop(df, gcube_token, batch_size=200, ma
 
 # %%
 
-df=pd.read_csv("datasets/processed/all_data_df_resolved.csv")
-# embedding_df = pd.DataFrame(columns=["index", "referenced_image_embeddings"])
+# df=pd.read_csv("datasets/processed/all_data_df_resolved.csv")
 
-embedding_df = pd.read_pickle("src/embeddings/image_embeddings_400.pkl")
+# batch_df = get_batch(0,800,df)
 
-
-# embedding_df = pd.read_pickle("src/embeddings/resnet_text_embeddings/image_embeddings_3600.pkl")
-
-batch_df = get_batch(0,800,df)
-
-
-# === Check if analysis is needed ===
-image_dir = "reference_images"
+# image_dir = "reference_images"
 
 # missing_indices = [idx for idx in batch_df.index if  images_exist_for_index(idx, image_dir) != "file exists"]
 
@@ -608,25 +597,3 @@ image_dir = "reference_images"
 #     texts = (batch_df.loc[missing_indices, 'resolved_title'] + " <body>" + batch_df.loc[missing_indices, 'resolved_text']).tolist()
 #     all_imgs = run_async_batch_analysis(texts, GCUBE_TOKEN, max_concurrent_texts=8)
 #     save_images_from_batch(all_imgs, missing_indices, image_dir)
-
-# else:
-#     print("All images exist. Skipping run_async_batch_analysis.")
-all_imgs = load_images_for_batch(batch_df, image_dir)
-
-
-all_embeddings = process_img_embeddings_batch(all_imgs, df, batch_df, IMG_PATH, mode="clip")
-# Create batch embedding dataframe
-batch_embedding_df = pd.DataFrame({
-    "index": batch_df.index,  # preserves mapping to original df
-    "referenced_image_embeddings": all_embeddings
-})
-
-
-# # # Append to the master embedding DataFrame
-embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
-embedding_df.to_pickle("src/embeddings/image_embeddings_800.pkl")
-# # # # Append to the master embedding DataFrame
-# embedding_df = pd.concat([embedding_df, batch_embedding_df], ignore_index=True)
-
-
-

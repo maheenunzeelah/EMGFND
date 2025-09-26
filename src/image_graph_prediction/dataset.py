@@ -52,3 +52,7 @@ all_img_embeddings
 # %%
 df.info()
 # %%
+df=pd.read_csv("../../datasets/processed/all_data_df_resolved.csv")
+# %%
+print(df['type'].value_counts())
+# %%
