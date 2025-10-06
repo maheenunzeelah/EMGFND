@@ -1,4 +1,4 @@
-from image_graph_prediction.evaluation_utils import eval_func
+from emgfnd.evaluation_utils import eval_func
 import os, random, numpy as np, torch
 
 SEED = 42
@@ -14,13 +14,13 @@ torch.set_num_threads(1)
 # 🔒 ---- End reproducibility settings ----
 
 # ✅ then the rest of your imports
-from image_graph_prediction.model_config import Config
-from image_graph_prediction.utils import set_up_media_eval_dataset, set_up_multimodal_dataset
+from emgfnd.model_config import Config
+from emgfnd.utils import set_up_media_eval_dataset, set_up_all_data_dataset
 import torch
 from torchmetrics.classification import BinaryF1Score
 from torch_geometric.loader import DataLoader
 from torch import nn
-from image_graph_prediction.model import PGATClassifier
+from emgfnd.pgat_model import PGATClassifier
 import numpy as np
 from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, auc
 
@@ -32,8 +32,8 @@ def evaluate_model_on_test_set():
   print(f"Using device: {device}")
 
 
-  dataset_train, dataset_val, dataset_test = set_up_multimodal_dataset()
-  # torch.save(dataset_test, "allData_clip_text_dataset_test.pt")
+  dataset_train, dataset_val, dataset_test = set_up_all_data_dataset()
+  # torch.save(dataset_test, "all_data_model_clip_title_final.pt")
   dataloader_test = DataLoader(
     dataset_test,
     batch_size=config.batch_size,
@@ -55,7 +55,8 @@ def evaluate_model_on_test_set():
    
   # Load the best model
   try:
-      best_model_path = "best_models/all_data_model_clip_title_final.pth"
+      best_model_path = "best_models/all_data_clip_text_model.pth"
+      # best_model_path ='best_models/final_all_data_model_clip_text_final.pth'
       checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
       
       # Load model state

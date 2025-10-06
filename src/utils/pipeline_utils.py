@@ -1,4 +1,5 @@
 import config
+import validators
 from transformers import AutoTokenizer, AutoModel, CLIPTextModelWithProjection
 import torch
 import pytesseract
@@ -23,7 +24,6 @@ bert_model.eval()
 
 clip_model = CLIPTextModelWithProjection.from_pretrained("openai/clip-vit-large-patch14").to(device)
 clip_tokenizer = AutoTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-
 
 model_name= config.text_embed_model
 nlp = spacy.load("en_core_web_trf")
@@ -247,35 +247,6 @@ def clean_ocr_text(image, conf_threshold=90):
     
     return cleaned_text
 
-def save_images_from_batch(image_lists, indices_list, output_dir):
-    """
-    Saves images with filenames based on provided indices and image position.
-
-    Args:
-        image_lists (list of list of PIL.Image): List of lists of images.
-        indices_list (list): List of indices corresponding to the image_lists.
-        output_dir (str): Directory where images will be saved.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    for i, (row_index, images) in enumerate(zip(indices_list, image_lists)):
-        for j, img in enumerate(images):
-            print(row_index, "row_index")
-            filename = f"node_{row_index}_{j}.jpg"
-            filepath = os.path.join(output_dir, filename)
-            img.save(filepath)
-
-def images_exist_for_index(idx, image_dir):
-    """Check if at least one image file exists for a given index."""
-    
-    filepath = os.path.join(image_dir, f"node_{idx}_0.jpg")
-    # print(os.path.exists(filepath), "----> file")
-    if os.path.exists(filepath):
-        return "file exists"
-    else:
-        print(f"Missing image for index: {idx}")
-        return idx
-
 def get_batch(start_index, end_index,df):
     return df.iloc[start_index:end_index]
 
@@ -328,7 +299,6 @@ def process_img_embeddings_batch(all_img, df, batch_df, model):
         # Collect all URLs for this row
         imgs = [img for img in row]
         try:
-            print(img_paths[i],"imgggg")
             if img_paths[i] is not None:
                 img_pil = get_pil_image_cached(img_paths[i])
                 imgs.append(img_pil)
@@ -425,3 +395,6 @@ def extract_text_arrays_from_column(batch_df, column_name):
             all_texts.append([])  # fallback if parsing fails
     
     return all_texts
+
+def is_url(s):
+    return validators.url(s)

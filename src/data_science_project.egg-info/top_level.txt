@@ -1,4 +1,0 @@
-all_data
-constants
-pipelines
-utils

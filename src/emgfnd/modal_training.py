@@ -1,37 +1,27 @@
 ## Importing libraries
-from image_graph_prediction.model_config import Config
-from image_graph_prediction.model import PGATClassifier
-from image_graph_prediction.utils import set_up_media_eval_dataset, set_up_multimodal_dataset
+from emgfnd.model_config import Config
+from emgfnd.pgat_model import PGATClassifier
+from emgfnd.utils import set_up_media_eval_dataset, set_up_all_data_dataset
+from emgfnd.evaluation_utils import eval_func
 import numpy as np
-
 import math
-
-
 import torch
 from torch import nn
-
 from torch.optim import AdamW
-
 from torch_geometric.loader import DataLoader
 from torch.utils.data import WeightedRandomSampler
-
 from collections import Counter
-
-
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
-
 from transformers import get_linear_schedule_with_warmup
 from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
 import matplotlib.pyplot as plt
-from image_graph_prediction.utils import plot_acc_graph, plot_loss_graph
-
 import wandb
 
 # Initialize wandb
 wandb.init(project="multimodal-graph-classification", entity="", name="multimodal-experiment")
 
 # =====================================================
-# CLASS IMBALANCE HANDLING SOLUTIONS
+# AUC METRICS CLASS
 # =====================================================
 class AUCMetrics:
     def __init__(self):
@@ -144,6 +134,10 @@ def log_auc_to_wandb(metrics_dict, epoch, phase='train'):
         # Log to wandb
         wandb.log({f'{phase}/pr_curve': wandb.Image(plt)})
         plt.close()
+
+# =====================================================
+# CLASS IMBALANCE HANDLING FUNCTIONS
+# =====================================================
 
 def calculate_class_weights(dataset):
     """Calculate class weights for imbalanced dataset"""
@@ -260,7 +254,6 @@ def find_optimal_threshold(model, dataloader, device):
     # Try different thresholds
     best_f1 = 0.0
     best_threshold = 0.5
-
     
     thresholds = np.arange(0.1, 0.9, 0.05)
     for threshold in thresholds:
@@ -320,11 +313,16 @@ def create_fresh_model():
     return PGATClassifier()
 
 # =====================================================
-# BALANCED TRAINING FUNCTION
+#  TRAINING FUNCTION
 # =====================================================
 
-def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, scheduler, criterion, optimal_threshold=0.5):
-    """Training function with balanced loss and better metrics"""
+def train_func_epoch(epoch, model, dataloader, device, optimizer, scheduler, criterion, 
+                     optimal_threshold=0.5, handle_imbalance=False):
+    """Training function for both balanced and imbalanced datasets
+    
+    Args:
+        handle_imbalance: If True, includes class-specific metrics and uses optimal threshold
+    """
     model.train()
     total_loss = 0
     valid_batches = 0
@@ -335,8 +333,9 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
     train_rec = BinaryRecall().to(device)
     train_f1 = BinaryF1Score().to(device)
 
-    # Initialize AUC metrics
-    auc_metrics = AUCMetrics()
+    # Initialize AUC metrics if handling imbalance
+    if handle_imbalance:
+        auc_metrics = AUCMetrics()
     
     # Track class-specific predictions
     all_preds = []
@@ -356,7 +355,7 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
             if batch.edge_index.dtype != torch.long:
                 batch.edge_index = batch.edge_index.long()
             
-            # CRITICAL: Detach all inputs to ensure no gradient tracking from previous iterations
+            #Detach all inputs to ensure no gradient tracking from previous iterations
             x_input = batch.x.detach().requires_grad_(True)
             edge_index_input = batch.edge_index.detach()
             batch_input = batch.batch.detach() if hasattr(batch, 'batch') else None
@@ -384,7 +383,7 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
                 print(f"Shape mismatch at batch {batch_idx}: out {out.shape}, targets {targets.shape}")
                 continue
             
-            # Calculate weighted loss
+            # Calculate loss
             loss = criterion(out, targets)
             
             if check_for_nan_inf(loss, f"loss at batch {batch_idx}"):
@@ -408,15 +407,18 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
             total_loss += loss.item()
             valid_batches += 1
             
-            # Calculate metrics with optimal threshold
+            # Calculate metrics
             with torch.no_grad():
                 preds = torch.sigmoid(out.detach()).cpu()
                 targets_cpu = targets.detach().cpu()
 
-                 # Update AUC metrics (use raw probabilities, not binary)
-                auc_metrics.update(preds, targets_cpu)
+                # Update AUC metrics if handling imbalance (use raw probabilities, not binary)
+                if handle_imbalance:
+                    auc_metrics.update(preds, targets_cpu)
                 
-                preds_binary = (preds > optimal_threshold).float()
+                # Use optimal threshold if handling imbalance, otherwise use 0.5
+                threshold = optimal_threshold if handle_imbalance else 0.5
+                preds_binary = (preds > threshold).float()
                 
                 # Store for detailed analysis
                 all_preds.extend(preds_binary.numpy())
@@ -427,9 +429,6 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
                 train_prec.update(preds_binary, targets_cpu)
                 train_rec.update(preds_binary, targets_cpu)
                 train_f1.update(preds_binary, targets_cpu)
-            
-            # if batch_idx % 10 == 0:
-            #     print(f"Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}")
                 
         except RuntimeError as e:
             if "backward through the graph a second time" in str(e):
@@ -443,17 +442,17 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
                 
             else:
                 print(f"Runtime error in batch {batch_idx}: {str(e)}")
-                optimizer.zero_grad()  # Clear gradients on any error
+                optimizer.zero_grad()
             
             continue
             
         except Exception as e:
             print(f"Unexpected error in batch {batch_idx}: {str(e)}")
-            optimizer.zero_grad()  # Clear gradients on any error
+            optimizer.zero_grad()
             continue
         
         finally:
-            # CRITICAL: Explicit cleanup after each batch
+            # Explicit cleanup after each batch
             if 'out' in locals():
                 del out
             if 'loss' in locals():
@@ -473,217 +472,64 @@ def train_func_epoch_balanced(epoch, model, dataloader, device, optimizer, sched
     
     # Calculate detailed metrics
     if valid_batches > 0:
-        # Class-specific metrics
-        all_preds = np.array(all_preds)
-        all_targets = np.array(all_targets)
-        
-        # Per-class metrics
-        class_0_mask = all_targets == 0
-        class_1_mask = all_targets == 1
-        
-        if class_0_mask.sum() > 0:
-            class_0_acc = np.mean(all_preds[class_0_mask] == all_targets[class_0_mask])
-            class_0_recall = np.mean(all_preds[class_0_mask] == 0)  # True negatives
-        else:
-            class_0_acc = class_0_recall = 0.0
-            
-        if class_1_mask.sum() > 0:
-            class_1_acc = np.mean(all_preds[class_1_mask] == all_targets[class_1_mask])
-            class_1_recall = np.mean(all_preds[class_1_mask] == 1)  # True positives
-        else:
-            class_1_acc = class_1_recall = 0.0
-
-         # Compute AUC metrics
-        auc_results = auc_metrics.compute_metrics()
-        
         train_report = {
             "accuracy": train_acc.compute().item(),
             "precision": train_prec.compute().item(),
             "recall": train_rec.compute().item(),
-            "f1_score": train_f1.compute().item(),
-            "class_0_accuracy": class_0_acc,
-            "class_1_accuracy": class_1_acc,
-            "class_0_recall": class_0_recall,
-            "class_1_recall": class_1_recall,
-            "roc_auc": auc_results.get('roc_auc', 0.0),
-            "pr_auc": auc_results.get('pr_auc', 0.0)
+            "f1_score": train_f1.compute().item()
         }
+        
+        # Add class-specific metrics if handling imbalance
+        if handle_imbalance:
+            all_preds = np.array(all_preds)
+            all_targets = np.array(all_targets)
+            
+            # Per-class metrics
+            class_0_mask = all_targets == 0
+            class_1_mask = all_targets == 1
+            
+            if class_0_mask.sum() > 0:
+                class_0_acc = np.mean(all_preds[class_0_mask] == all_targets[class_0_mask])
+                class_0_recall = np.mean(all_preds[class_0_mask] == 0)
+            else:
+                class_0_acc = class_0_recall = 0.0
+                
+            if class_1_mask.sum() > 0:
+                class_1_acc = np.mean(all_preds[class_1_mask] == all_targets[class_1_mask])
+                class_1_recall = np.mean(all_preds[class_1_mask] == 1)
+            else:
+                class_1_acc = class_1_recall = 0.0
+
+            # Compute AUC metrics
+            auc_results = auc_metrics.compute_metrics()
+            
+            train_report.update({
+                "class_0_accuracy": class_0_acc,
+                "class_1_accuracy": class_1_acc,
+                "class_0_recall": class_0_recall,
+                "class_1_recall": class_1_recall,
+                "roc_auc": auc_results.get('roc_auc', 0.0),
+                "pr_auc": auc_results.get('pr_auc', 0.0)
+            })
+        else:
+            auc_results = {}
+        
         avg_loss = total_loss / valid_batches
-        
-        # print(f"\nDetailed Training Metrics:")
-        # print(f"Real News (0) Accuracy: {class_0_acc:.4f}, Recall: {class_0_recall:.4f}")
-        # print(f"Fake News (1) Accuracy: {class_1_acc:.4f}, Recall: {class_1_recall:.4f}")
-        # print(f"ROC AUC: {auc_results.get('roc_auc', 0.0):.4f}, PR AUC: {auc_results.get('pr_auc', 0.0):.4f}")
-        
     else:
         train_report = {
-            "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1_score": 0.0,
-            "class_0_accuracy": 0.0, "class_1_accuracy": 0.0,
-            "class_0_recall": 0.0, "class_1_recall": 0.0,
-            "roc_auc": 0.0, "pr_auc": 0.0
+            "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1_score": 0.0
         }
+        if handle_imbalance:
+            train_report.update({
+                "class_0_accuracy": 0.0, "class_1_accuracy": 0.0,
+                "class_0_recall": 0.0, "class_1_recall": 0.0,
+                "roc_auc": 0.0, "pr_auc": 0.0
+            })
         avg_loss = float('inf')
         auc_results = {}
     
-    return avg_loss, train_report, auc_results
+    return avg_loss, train_report, auc_results if handle_imbalance else (avg_loss, train_report)
 
-# =====================================================
-# BALANCED EVALUATION FUNCTION
-# =====================================================
-
-def eval_func_balanced(model, dataloader, device, epoch, criterion, optimal_threshold=0.5):
-    """Evaluation function with improved error handling and optimal threshold"""
-    model.eval()
-    total_loss = 0
-    valid_batches = 0
-    
-    # Initialize metrics
-    val_acc = BinaryAccuracy().to(device)
-    val_prec = BinaryPrecision().to(device)
-    val_rec = BinaryRecall().to(device)
-    val_f1 = BinaryF1Score().to(device)
-
-    # Initialize AUC metrics
-    auc_metrics = AUCMetrics()
-    
-    all_preds = []
-    all_targets = []
-    
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            try:
-                batch = batch.to(device)
-                
-                # Validate input data
-                if check_for_nan_inf(batch.x, f"val batch.x at batch {batch_idx}"):
-                    continue
-                
-                # Ensure edge_index is properly formatted
-                if batch.edge_index.dtype != torch.long:
-                    batch.edge_index = batch.edge_index.long()
-                
-                # Forward pass
-                out = model(batch.x, batch.edge_index, batch.batch)
-                
-                # Validate output
-                if check_for_nan_inf(out, f"val model output at batch {batch_idx}"):
-                    continue
-                
-                # Prepare targets
-                targets = batch.y.float()
-                if targets.dim() > 1:
-                    targets = targets.view(-1)
-                
-                # Ensure shapes match
-                if out.shape != targets.shape:
-                    continue
-                
-                loss = criterion(out, targets)
-                
-                if not check_for_nan_inf(loss, f"val loss at batch {batch_idx}"):
-                    total_loss += loss.item()
-                    valid_batches += 1
-                    
-                    # Calculate metrics with optimal threshold
-                    preds = torch.sigmoid(out).cpu()
-                    targets_cpu = targets.cpu()
-
-                    # Update AUC metrics (use raw probabilities, not binary)
-                    auc_metrics.update(preds, targets_cpu)
-                    
-                    preds = torch.clamp(preds, 0.0, 1.0)
-                    preds_binary = (preds > optimal_threshold).long()
-
-                    all_preds.append(preds_binary)
-                    all_targets.append(targets_cpu.long())
-                    
-                    val_acc.update(preds_binary.float(), targets_cpu)
-                    val_prec.update(preds_binary.float(), targets_cpu)
-                    val_rec.update(preds_binary.float(), targets_cpu)
-                    val_f1.update(preds_binary.float(), targets_cpu)
-                    
-            except Exception as e:
-                print(f"Error in validation batch {batch_idx}: {str(e)}")
-                continue
-    
-    # Compute final metrics
-    if valid_batches > 0:
-        acc = val_acc.compute().item()
-        prec = val_prec.compute().item()
-        rec = val_rec.compute().item()
-        f1_score = val_f1.compute().item()
-        avg_loss = total_loss / valid_batches
-        
-    else:
-        acc = prec = rec = f1_score = 0.0
-        avg_loss = float('inf')
-
-    auc_results = auc_metrics.compute_metrics()
-    
-    # Calculate per-class metrics
-    class_0_acc = class_1_acc = 0.0
-    class_0_prec = class_1_prec = 0.0
-    class_0_rec = class_1_rec = 0.0
-    class_0_f1 = class_1_f1 = 0.0
-    
-    if all_preds:
-        all_preds_arr = torch.cat(all_preds).numpy()
-        all_targets_arr = torch.cat(all_targets).numpy()
-        
-        # Calculate confusion matrix components
-        tp = np.sum((all_preds_arr == 1) & (all_targets_arr == 1))  # True Positives
-        tn = np.sum((all_preds_arr == 0) & (all_targets_arr == 0))  # True Negatives
-        fp = np.sum((all_preds_arr == 1) & (all_targets_arr == 0))  # False Positives
-        fn = np.sum((all_preds_arr == 0) & (all_targets_arr == 1))  # False Negatives
-        
-       # ✅ treat class 0 (real) as “positive” for its own metrics
-        class_0_total = tn + fp            # all true real + misclassified real
-        class_0_predicted = tn + fn        # everything predicted real
-
-        if class_0_total > 0:
-            class_0_acc  = tn / class_0_total
-            class_0_rec  = tn / class_0_total   # recall for real
-        if class_0_predicted > 0:
-            class_0_prec = tn / (tn + fn)       # precision for real
-        if class_0_prec + class_0_rec > 0:
-            class_0_f1   = 2 * class_0_prec * class_0_rec / (class_0_prec + class_0_rec)
-        
-        # Class 1 metrics (considering class 1 as positive)
-        class_1_total = tp + fn  # Total actual class 1 samples
-        class_1_predicted = tp + fp  # Total predicted class 1 samples
-        
-        if class_1_total > 0:
-            class_1_acc = tp / class_1_total  # True Positive Rate (same as recall)
-            class_1_rec = tp / class_1_total  # Recall for class 1
-        
-        if class_1_predicted > 0:
-            class_1_prec = tp / (tp + fp)  # Precision for class 1
-        
-        if class_1_prec + class_1_rec > 0:
-            class_1_f1 = 2 * (class_1_prec * class_1_rec) / (class_1_prec + class_1_rec)
-            
-    else:
-        all_preds_arr = np.array([])
-        all_targets_arr = np.array([])
-    
-    report = {
-        "accuracy": acc,
-        "precision": prec,
-        "recall": rec,
-        "f1_score": f1_score,
-        "class_0_accuracy": class_0_acc,
-        "class_0_precision": class_0_prec,
-        "class_0_recall": class_0_rec,
-        "class_0_f1_score": class_0_f1,
-        "class_1_accuracy": class_1_acc,
-        "class_1_precision": class_1_prec,
-        "class_1_recall": class_1_rec,
-        "class_1_f1_score": class_1_f1,
-        "roc_auc": auc_results.get('roc_auc', 0.0),
-        "pr_auc": auc_results.get('pr_auc', 0.0),
-    }
-    
-    return avg_loss, report, acc, prec, rec, f1_score, all_targets_arr, all_preds_arr, auc_results
 
 # =====================================================
 # MAIN TRAINING CODE
@@ -694,12 +540,17 @@ config = Config()
 
 if __name__ == '__main__':
     
+    # =====================================================
+    # CONFIGURATION: SET THESE PARAMETERS
+    # =====================================================
+    HANDLE_IMBALANCE = True  # Set to True for imbalanced datasets, False for balanced
+    dataset_name = "all_data"  # "all_data" or "media_eval"
+    
     ## Setup the dataset 
-    dataset_name = "multimodal"
     set_seed(42) 
 
-    if dataset_name == "multimodal":  
-        dataset_train, dataset_val, dataset_test = set_up_multimodal_dataset()
+    if dataset_name == "all_data":  
+        dataset_train, dataset_val, dataset_test = set_up_all_data_dataset()
     else:
         dataset_train, dataset_val, dataset_test = set_up_media_eval_dataset()
     
@@ -709,41 +560,59 @@ if __name__ == '__main__':
     val_labels = [data.y.item() for data in dataset_val]
     print(f"Training set: {Counter(train_labels)}")
     print(f"Validation set: {Counter(val_labels)}")
+    print(f"Test set: {len(dataset_test)} samples")
     
     # =====================================================
-    # SETUP BALANCED TRAINING COMPONENTS
+    # SETUP TRAINING COMPONENTS BASED ON IMBALANCE FLAG
     # =====================================================
     
-    # Option 1: Create weighted sampler for balanced batching
-    print("\n=== SETTING UP WEIGHTED SAMPLER ===")
-    weighted_sampler = create_weighted_sampler(dataset_train)
-    
-    # Option 2: Setup weighted loss function
-    print("\n=== SETTING UP WEIGHTED LOSS FUNCTION ===")
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Handling imbalance: {HANDLE_IMBALANCE}")
     
-    # Choose your loss function (uncomment one):
-    # Option A: Weighted BCE Loss
-    # criterion = get_weighted_loss_function(dataset_train, device)
-    
-    # Option B: Focal Loss (alternative)
-    # fake_weight = 0.25            
-    # real_weight = 0.75
-    criterion = FocalLoss(alpha=0.2, gamma=2.0)
-    # criterion = FocalLoss(alpha=None, gamma=4.0)
-    # print("Using Focal Loss")
-    
-    ## Setup the dataloaders with weighted sampler
-    dataloader_train = DataLoader(
-        dataset_train,
-        batch_size=config.batch_size,
-        sampler=weighted_sampler,  # Use weighted sampler instead of shuffle
-        drop_last=False,
-        pin_memory=True if torch.cuda.is_available() else False,
-        num_workers=0
-    )
+    if HANDLE_IMBALANCE:
+        print("\n=== SETTING UP FOR IMBALANCED DATASET ===")
+        
+        # Create weighted sampler for balanced batching
+        print("\n=== SETTING UP WEIGHTED SAMPLER ===")
+        weighted_sampler = create_weighted_sampler(dataset_train)
+        
+        # Setup weighted loss function
+        print("\n=== SETTING UP WEIGHTED LOSS FUNCTION ===")
+        # Choose your loss function (uncomment one):
+        # Option A: Weighted BCE Loss
+        # criterion = get_weighted_loss_function(dataset_train, device)
+        
+        # Option B: Focal Loss (alternative)
+        criterion = FocalLoss(alpha=0.2, gamma=2.0)
+        
+        # Setup dataloader with weighted sampler
+        dataloader_train = DataLoader(
+            dataset_train,
+            batch_size=config.batch_size,
+            sampler=weighted_sampler,  # Use weighted sampler instead of shuffle
+            drop_last=False,
+            pin_memory=True if torch.cuda.is_available() else False,
+            num_workers=0
+        )
+    else:
+        print("\n=== SETTING UP FOR BALANCED DATASET ===")
+        
+        # Standard BCE loss for balanced datasets
+        criterion = nn.BCEWithLogitsLoss()
+        print("Using standard BCEWithLogitsLoss")
+        
+        # Setup dataloader with standard shuffling
+        dataloader_train = DataLoader(
+            dataset_train,
+            batch_size=config.batch_size,
+            shuffle=True,
+            drop_last=False,
+            pin_memory=True if torch.cuda.is_available() else False,
+            num_workers=0
+        )
 
+    # Validation and test dataloaders (same for both cases)
     dataloader_val = DataLoader(
         dataset_val,
         batch_size=config.batch_size,
@@ -762,7 +631,7 @@ if __name__ == '__main__':
         num_workers=0
     )
     
-    ## Initialize the fixed model
+    ## Initialize the model
     gnn_model = PGATClassifier()
     print("Total number of parameters:", sum(p.numel() for p in gnn_model.parameters()))
     gnn_model.to(device)
@@ -771,17 +640,16 @@ if __name__ == '__main__':
     num_update_steps_per_epoch = math.ceil(len(dataloader_train) / config.gradient_accumulation_steps)
     num_train_steps = num_update_steps_per_epoch * config.epochs
     
-    # Use a more conservative learning rate and optimizer settings
+    # Optimizer settings
     optimizer = AdamW(
         gnn_model.parameters(), 
-        lr=config.lr,  # Reduce learning rate
-        weight_decay=config.weight_decay,   # Slightly less weight decay
-        # eps=1e-8             # Epsilon for numerical stability
+        lr=config.lr,
+        weight_decay=config.weight_decay
     )
     
     scheduler = get_linear_schedule_with_warmup(
         optimizer, 
-        num_warmup_steps=10,  # More warmup steps
+        num_warmup_steps=10,
         num_training_steps=num_train_steps
     )
 
@@ -801,9 +669,7 @@ if __name__ == '__main__':
             gnn_model.train()
             optimizer.zero_grad()
 
-            # Detach + clone test_batch.x to avoid potential reuse of autograd graph
             fresh_x = test_batch.x.detach().clone().requires_grad_(True)
-
             test_out = gnn_model(fresh_x, test_batch.edge_index, test_batch.batch)
             test_targets = test_batch.y.float()
             if test_targets.dim() > 1:
@@ -815,16 +681,21 @@ if __name__ == '__main__':
 
             del test_out, test_targets, test_loss
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
+            break
                 
-        print(f"Successfully tested {test_batches} batches")
+        print(f"Successfully tested model")
         
     except Exception as e:
         print(f"Error in model testing: {e}")
         exit(1)
 
     best_loss = np.inf
-    optimal_threshold = 0.5  # Will be updated after first few epochs
+    optimal_threshold = 0.5  # Will be updated if HANDLE_IMBALANCE is True
+    best_acc = 0.0
+    epochs_no_improve = 0
+    early_stopping_patience = 20 if HANDLE_IMBALANCE else 3
+    consecutive_errors = 0
+    max_consecutive_errors = 3
     
     def reinitialize_model_if_needed():
         """Reinitialize model if graph issues persist"""
@@ -836,27 +707,17 @@ if __name__ == '__main__':
         # Reinitialize optimizer as well
         optimizer = AdamW(
             gnn_model.parameters(), 
-            lr=config.lr ,
-            weight_decay=config.weight_decay,
-            # eps=1e-8
+            lr=config.lr,
+            weight_decay=config.weight_decay
         )
         return optimizer
-        
-    # Add error recovery in your epoch loop:
-    consecutive_errors = 0
-    max_consecutive_errors = 3
-    best_f1 = 0.0
-    best_acc = 0.0
-    epochs_no_improve = 0
-    early_stopping_patience = 20
-    early_stop = False
+    
     train_losses = []
     val_losses = []
     train_accs = []
     val_accs = []
-
     
-    print("\n=== STARTING BALANCED TRAINING ===")
+    print(f"\n=== STARTING TRAINING (IMBALANCE: {HANDLE_IMBALANCE}) ===")
     
     for epoch in range(config.epochs):
         print(f"\n---------------------- Epoch: {epoch+1} ---------------------------------- \n")
@@ -865,10 +726,19 @@ if __name__ == '__main__':
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         try:
-            ## Training Loop with balanced approach
-            train_loss, train_report, train_auc_results = train_func_epoch_balanced(
-                epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, criterion, optimal_threshold
-            )
+            ## Training Loop
+            if HANDLE_IMBALANCE:
+                train_loss, train_report, train_auc_results = train_func_epoch(
+                    epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, 
+                    criterion, optimal_threshold, handle_imbalance=True
+                )
+            else:
+                train_loss, train_report = train_func_epoch(
+                    epoch+1, gnn_model, dataloader_train, device, optimizer, scheduler, 
+                    criterion, handle_imbalance=False
+                )
+                train_auc_results = {}
+            
             consecutive_errors = 0  # Reset error counter on success
             
         except Exception as e:
@@ -884,16 +754,18 @@ if __name__ == '__main__':
                 print("Retrying epoch...")
                 continue
 
-        ## Validation loop with balanced evaluation
-        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds, val_auc_results= eval_func_balanced(
-            gnn_model, dataloader_val, device, epoch+1, criterion, optimal_threshold
+        ## Validation loop
+        val_loss, report, acc, prec, rec, f1_score, val_labels, val_preds, val_auc_results = eval_func(
+            gnn_model, dataloader_val, device, epoch+1, criterion, 
+            optimal_threshold if HANDLE_IMBALANCE else 0.5
         )
 
-        # Log AUC curves to wandb
-        if train_auc_results:
-            log_auc_to_wandb(train_auc_results, epoch+1, 'train')
-        if val_auc_results:
-            log_auc_to_wandb(val_auc_results, epoch+1, 'val')
+        # Log AUC curves to wandb if handling imbalance
+        if HANDLE_IMBALANCE:
+            if train_auc_results:
+                log_auc_to_wandb(train_auc_results, epoch+1, 'train')
+            if val_auc_results:
+                log_auc_to_wandb(val_auc_results, epoch+1, 'val')
         
         # Print confusion matrix if we have predictions
         if len(val_labels) > 0 and len(val_preds) > 0:
@@ -904,13 +776,14 @@ if __name__ == '__main__':
         print()
         print("Train Report:")
         print(f"Accuracy: {train_report['accuracy']:.4f} | Precision: {train_report['precision']:.4f} | Recall: {train_report['recall']:.4f} | F1: {train_report['f1_score']:.4f}")
-        print(f"Class 0 (Real) Acc: {train_report['class_0_accuracy']:.4f} | Class 1 (Fake) Acc: {train_report['class_1_accuracy']:.4f}")
+        if HANDLE_IMBALANCE:
+            print(f"Class 0 (Real) Acc: {train_report['class_0_accuracy']:.4f} | Class 1 (Fake) Acc: {train_report['class_1_accuracy']:.4f}")
         print()
         print("Validation Report:")
         print(f"Accuracy: {report['accuracy']:.4f} | Precision: {report['precision']:.4f} | Recall: {report['recall']:.4f} | F1: {report['f1_score']:.4f}")
-        # print(f"ROC AUC: {report['roc_auc']:.4f} | PR AUC: {report['pr_auc']:.4f}")
-        # Find optimal threshold every few epochs
-        if epoch > 0 and epoch % 3 == 0:  # Update threshold every 3 epochs
+
+        # Update optimal threshold periodically if handling imbalance
+        if HANDLE_IMBALANCE and epoch > 0 and epoch % 3 == 0:
             try:
                 new_threshold = find_optimal_threshold(gnn_model, dataloader_val, device)
                 optimal_threshold = new_threshold
@@ -918,40 +791,40 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"Could not update threshold: {e}")
         
-        # Only log to wandb if values are valid
-        if not any([math.isnan(x) or math.isinf(x) for x in [train_loss, val_loss, acc, prec, rec, f1_score]]):
-            wandb.log({
-                "train_loss": train_loss, 
-                "train-acc": train_report["accuracy"],
-                "train-prec": train_report["precision"],
-                "train-rec": train_report["recall"],
-                "train-f1": train_report["f1_score"],
+        # Build wandb log dict
+        wandb_log = {
+            "train_loss": train_loss, 
+            "train-acc": train_report["accuracy"],
+            "train-prec": train_report["precision"],
+            "train-rec": train_report["recall"],
+            "train-f1": train_report["f1_score"],
+            "val-loss": val_loss, 
+            "val-prec": prec, 
+            "val-rec": rec, 
+            "val-f1score": f1_score, 
+            "val-acc": report["accuracy"],
+            "Loss/Train": train_loss,
+            "Loss/Validation": val_loss,
+            "Accuracy/Train": train_report["accuracy"],
+            "Accuracy/Validation": report["accuracy"],
+            "epoch": epoch + 1
+        }
+        
+        # Add imbalance-specific metrics if applicable
+        if HANDLE_IMBALANCE:
+            wandb_log.update({
                 "train-class0-acc": train_report["class_0_accuracy"],
                 "train-class1-acc": train_report["class_1_accuracy"],
-                "val-loss": val_loss, 
-                "val-prec": prec, 
-                "val-rec": rec, 
-                "val-f1score": f1_score, 
-                "val-acc": report["accuracy"],
-                # "val-roc-auc": report["roc_auc"],
-                # "val-pr-auc": report["pr_auc"],
-                "optimal_threshold": optimal_threshold,
-                "Loss/Train": train_loss,
-                "Loss/Validation": val_loss,
-                "Accuracy/Train": train_report["accuracy"],
-                "Accuracy/Validation": report["accuracy"],
-                "epoch": epoch + 1,
-                
+                "optimal_threshold": optimal_threshold
             })
         
-        print(f"\n----------------------------------------------------------------------------")
+        # Only log to wandb if values are valid
+        if not any([math.isnan(x) or math.isinf(x) for x in [train_loss, val_loss, acc, prec, rec, f1_score]]):
+            wandb.log(wandb_log)
         
-        # if f1_score > best_f1:
-        #     best_f1 = f1_score
-        #     epochs_no_improve = 0
-        # else:
-        #     epochs_no_improve += 1
+        print(f"\n----------------------------------------------------------------------------")
 
+        # Early stopping check
         if report["accuracy"] > best_acc:
             best_acc = report["accuracy"]
             epochs_no_improve = 0
@@ -960,48 +833,47 @@ if __name__ == '__main__':
 
         if epochs_no_improve >= early_stopping_patience:
             print(f"Early stopping triggered after {epoch+1} epochs. Best Acc: {best_acc:.4f}")
-            early_stop = True
             break
+
         # Save best model
         if val_loss < best_loss:
             best_loss = val_loss
-            torch.save({
+            save_dict = {
                 'model_state_dict': gnn_model.state_dict(),
-                'optimal_threshold': optimal_threshold,
                 'epoch': epoch,
-                'val_loss': val_loss,
-                'class_weights': calculate_class_weights(dataset_train)
-            }, config.best_model_path)
+                'val_loss': val_loss
+            }
+            if HANDLE_IMBALANCE:
+                save_dict['optimal_threshold'] = optimal_threshold
+                save_dict['class_weights'] = calculate_class_weights(dataset_train)
+            
+            torch.save(save_dict, config.best_model_path)
             print(f"New best model saved with validation loss: {val_loss:.4f}")
         
-      
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-
         train_accs.append(train_report["accuracy"])
         val_accs.append(report["accuracy"])
 
-
-
     print("Training completed!")
 
-    # Final threshold optimization
-    print("\n=== FINAL THRESHOLD OPTIMIZATION ===")
-    try:
-        final_threshold = find_optimal_threshold(gnn_model, dataloader_val, device)
-        print(f"Final optimal threshold: {final_threshold:.3f}")
-        
-        # Save final model with optimal threshold
-        torch.save({
-            'model_state_dict': gnn_model.state_dict(),
-            'optimal_threshold': final_threshold,
-            'epoch': epoch,
-            'class_weights': calculate_class_weights(dataset_train)
-        }, config.best_model_final_path)
-        
-    except Exception as e:
-        print(f"Could not perform final threshold optimization: {e}")
-    
+    # Final threshold optimization for imbalanced datasets
+    if HANDLE_IMBALANCE:
+        print("\n=== FINAL THRESHOLD OPTIMIZATION ===")
+        try:
+            final_threshold = find_optimal_threshold(gnn_model, dataloader_val, device)
+            print(f"Final optimal threshold: {final_threshold:.3f}")
+            
+            # Save final model with optimal threshold
+            torch.save({
+                'model_state_dict': gnn_model.state_dict(),
+                'optimal_threshold': final_threshold,
+                'epoch': epoch,
+                'class_weights': calculate_class_weights(dataset_train)
+            }, config.best_model_final_path)
+            
+        except Exception as e:
+            print(f"Could not perform final threshold optimization: {e}")
     
     print("\n=== EVALUATING ON TEST DATASET ===")
 
@@ -1013,51 +885,52 @@ if __name__ == '__main__':
 
     # Load the best model
     try:
-        best_model_path = config.best_model_final_path
-        checkpoint = torch.load(best_model_path, map_location=device,weights_only=False)
+        best_model_path = config.best_model_final_path if HANDLE_IMBALANCE else config.best_model_path
+        checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
         
         # Load model state
         gnn_model.load_state_dict(checkpoint['model_state_dict'])
         
-        # Use the optimal threshold from training
-        if 'optimal_threshold' in checkpoint:
+        # Use the optimal threshold from training if available
+        if HANDLE_IMBALANCE and 'optimal_threshold' in checkpoint:
             test_threshold = checkpoint['optimal_threshold']
             print(f"Using optimal threshold from training: {test_threshold:.3f}")
+        elif HANDLE_IMBALANCE and 'final_threshold' in locals():
+            test_threshold = final_threshold
+            print(f"Using final threshold: {test_threshold:.3f}")
         else:
-            test_threshold = final_threshold if 'final_threshold' in locals() else 0.5
+            test_threshold = 0.5
             print(f"Using threshold: {test_threshold:.3f}")
         
         print(f"Loaded best model from epoch {checkpoint.get('epoch', 'unknown')}")
         
     except FileNotFoundError:
         print("Best model not found, using current model state")
-        test_threshold = final_threshold if 'final_threshold' in locals() else optimal_threshold
+        test_threshold = 0.5
 
     # Evaluate on test set
-    test_loss, test_report, test_acc, test_prec, test_rec, test_f1, test_labels, test_preds , test_auc_results= eval_func_balanced(
+    test_loss, test_report, test_acc, test_prec, test_rec, test_f1, test_labels, test_preds, test_auc_results = eval_func(
         gnn_model, dataloader_test, device, 0, criterion, test_threshold
     )
 
-
     if len(test_labels) > 0 and len(test_preds) > 0:
-            print("Confusion Matrix:")
-            print(confusion_matrix(test_labels, test_preds))
+        print("Test Confusion Matrix:")
+        print(confusion_matrix(test_labels, test_preds))
+        
     print(f"\nTest Loss: {test_loss:.4f}")
     print(f"Test Accuracy: {test_acc:.4f} | Precision: {test_prec:.4f} | Recall: {test_rec:.4f} | F1: {test_f1:.4f}")
-    print(
-        f"Class 0 (Real) Acc: {test_report['class_0_accuracy']:.4f} | "
-        f"Class 1 (Fake) Acc: {test_report['class_1_accuracy']:.4f} | "
-        f"Class 0 (Real) Precision: {test_report['class_0_precision']:.4f} | "
-        f"Class 1 (Fake) Precision: {test_report['class_1_precision']:.4f} | "
-        f"Class 0 (Real) Recall: {test_report['class_0_recall']:.4f} | "
-        f"Class 1 (Fake) Recall: {test_report['class_1_recall']:.4f} | "
-        f"Class 0 (Real) F1: {test_report['class_0_f1_score']:.4f} | "
-        f"Class 1 (Fake) F1: {test_report['class_1_f1_score']:.4f} | "
-        f"ROC AUC: {test_report['roc_auc']:.4f} | PR AUC: {test_report['pr_auc']:.4f}"
-    )
+    
+    if HANDLE_IMBALANCE:
+        print(
+            f"Class 0 (Real) Acc: {test_report['class_0_accuracy']:.4f} | "
+            f"Class 1 (Fake) Acc: {test_report['class_1_accuracy']:.4f} | "
+            f"Class 0 (Real) Precision: {test_report['class_0_precision']:.4f} | "
+            f"Class 1 (Fake) Precision: {test_report['class_1_precision']:.4f} | "
+            f"Class 0 (Real) Recall: {test_report['class_0_recall']:.4f} | "
+            f"Class 1 (Fake) Recall: {test_report['class_1_recall']:.4f} | "
+            f"Class 0 (Real) F1: {test_report['class_0_f1_score']:.4f} | "
+            f"Class 1 (Fake) F1: {test_report['class_1_f1_score']:.4f} | "
+            f"ROC AUC: {test_report['roc_auc']:.4f} | PR AUC: {test_report['pr_auc']:.4f}"
+        )
    
-
     wandb.finish()
-
-    plot_loss_graph(train_losses, val_losses)
-    plot_acc_graph(train_accs, val_accs)

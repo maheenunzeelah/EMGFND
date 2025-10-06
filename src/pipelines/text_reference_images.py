@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 import time
 import config
-from pipelines.pipeline_utils import clean_entity_title_for_filename
+from utils.pipeline_utils import clean_entity_title_for_filename
 from utils.reference_images import get_batch
 import utils.tagMe as tagme
 import os

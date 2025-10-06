@@ -31,14 +31,13 @@ media_eval_train_imgs/
 media_eval_reference_images/
 media_eval_reference_test_images/
 all_data_reference_images/
-all_data_reference_images.zip
 visuals/
 test_datasets/
 
 # Files to ignore
 public_images.tar
 public_images.tar.bz2
-
+all_data_reference_images.zip
  
 
 # Data files

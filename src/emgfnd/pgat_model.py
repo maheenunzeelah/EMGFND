@@ -1,4 +1,4 @@
-from image_graph_prediction.model_config import Config
+from emgfnd.model_config import Config
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -74,12 +74,11 @@ def load_and_display_image(img_input, folder='allData_images'):
     return None
 
 
-# %%
 def pil_image_to_bytes(img: PILImage):
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     return buf.getvalue()
-# %%
+
 # Create a session with connection pooling and retry strategy
 def create_session():
     session = requests.Session()
@@ -146,9 +145,7 @@ def get_pil_image_fast(input_data):
             raise RuntimeError(f"Error decoding base64 image: {e}") from e
     
     raise ValueError("Input string is neither a valid URL, file path, nor a base64 image string.")
-# %%
 
-# %%
 def bytes_to_pil_image(byte_data: bytes):
     return PILImage.open(io.BytesIO(byte_data))
 
@@ -157,10 +154,3 @@ def find_image_file(base_filename, image_dir):
     pattern = os.path.join(image_dir, base_filename + ".*")
     matches = glob.glob(pattern)
     return matches[0] if matches else None
-
-# %%
-# load_and_display_image("<PIL.JpegImagePlugin.JpegImageFile image mode=RGB size=202x250 at 0x242D6AD6870>")
-# %%
-# encode_image('../../allData_images/images_2016_10_18_us_18fd-trumpfoundation_18fd-trumpfoundation-master675.jpg')
-# %%
-# get_pil_image_cached('allData_images/images_2016_10_18_us_18fd-trumpfoundation_18fd-trumpfoundation-master675.jpg')

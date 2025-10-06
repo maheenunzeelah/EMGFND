@@ -1,5 +1,5 @@
 import pandas as pd
-from pipelines.pipeline_utils import extract_text_arrays_from_column, get_batch, load_images_for_batch, media_eval_load_images_for_batch,process_img_embeddings_batch, process_text_embeddings_batch
+from utils.pipeline_utils import extract_text_arrays_from_column, get_batch, load_images_for_batch, media_eval_load_images_for_batch, process_img_embeddings_batch, process_text_embeddings_batch
 import json
 import config
 import pickle
@@ -19,7 +19,7 @@ if embedding_type == 'image':
     batch_df = get_batch(1000,len(df),df)
 
     all_imgs = media_eval_load_images_for_batch(batch_df, image_dir)
-    
+
     
     all_embeddings = process_img_embeddings_batch(all_imgs, df, batch_df, model=config.image_embed_model)
 

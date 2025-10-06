@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
-from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, precision_recall_curve, auc
+from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, auc
 
 class AUCMetrics:
     def __init__(self):
@@ -13,11 +13,12 @@ class AUCMetrics:
     
     def update(self, preds, targets):
         """Update with batch predictions and targets"""
+        
         if torch.is_tensor(preds):
-            # Apply sigmoid if not already applied
             if preds.min() < 0 or preds.max() > 1:
                 preds = torch.sigmoid(preds)
             preds = preds.detach().cpu().numpy()
+
         if torch.is_tensor(targets):
             targets = targets.detach().cpu().numpy()
         
@@ -36,7 +37,7 @@ class AUCMetrics:
         try:
             roc_auc = roc_auc_score(targets, preds)
         except ValueError:
-            roc_auc = 0.5  # If only one class present
+            roc_auc = 0.5 
         
         # Precision-Recall AUC
         try:
@@ -186,7 +187,7 @@ def eval_func(model, dataloader, device, epoch, criterion, optimal_threshold=0.5
         fp = np.sum((all_preds_arr == 1) & (all_targets_arr == 0))  # False Positives
         fn = np.sum((all_preds_arr == 0) & (all_targets_arr == 1))  # False Negatives
         
-       # ✅ treat class 0 (real) as “positive” for its own metrics
+        # Class 0 metrics (considering class 0 as positive)
         class_0_total = tn + fp            # all true real + misclassified real
         class_0_predicted = tn + fn        # everything predicted real
 
