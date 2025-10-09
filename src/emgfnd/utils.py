@@ -10,8 +10,8 @@ def set_up_all_data_dataset():
     """Setup the multimodal dataset"""
     # Load your data
     df = pd.read_csv(config.all_data_path)
-    img_embeddings_df = pd.read_pickle(config.clip_img_text_embeddings_path)
-    text_embeddings_df = pd.read_pickle(config.clip_text_embeddings_path)
+    img_embeddings_df = pd.read_pickle(config.clip_img_title_embeddings_path)
+    text_embeddings_df = pd.read_pickle(config.clip_title_embeddings_path)
     
     # Filter valid data
     valid_df = df[df['resolved_text'].notnull()].reset_index(drop=True)
@@ -19,7 +19,7 @@ def set_up_all_data_dataset():
     valid_text_embeddings_df = text_embeddings_df.loc[valid_df.index].reset_index(drop=True)
     
     all_img_embeddings = valid_img_embeddings_df['referenced_image_embeddings'].values
-    all_text_embeddings = valid_text_embeddings_df['text_embeddings'].values
+    all_text_embeddings = valid_text_embeddings_df['title_embeddings'].values
     
     valid_df['label'] = valid_df['type'].map({'real': 0, 'fake': 1})
     
@@ -36,7 +36,7 @@ def set_up_all_data_dataset():
    
     val_idx, test_idx = train_test_split(
         temp_idx,
-        test_size=(0.10),
+        test_size=(0.15),
         random_state=42,
         stratify=valid_df.iloc[temp_idx]['label'] if 'label' in valid_df.columns else None
     )

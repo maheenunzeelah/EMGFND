@@ -1,4 +1,4 @@
-# Multimodal Fake News Detection
+# External Multimodal Graph Based Fake News Detection
 
 A comprehensive pipeline for fake news detection using multimodal graph neural networks with entity-aware image and text embeddings.
 
@@ -7,6 +7,8 @@ A comprehensive pipeline for fake news detection using multimodal graph neural n
 ## 📋 Table of Contents
 
 - [Installation](#installation)
+- [Quick Start - Reproduce Results](#quick-start---reproduce-results)
+- [Datasets](#datasets)
 - [Configuration](#configuration)
 - [Pipelines](#pipelines)
   - [Text Summarization](#text-summarization)
@@ -14,6 +16,7 @@ A comprehensive pipeline for fake news detection using multimodal graph neural n
   - [Embedding Processing](#embedding-processing)
 - [Model Training & Evaluation](#model-training--evaluation)
 - [Project Structure](#project-structure)
+- [References & Credits](#references--credits)
 
 ---
 
@@ -24,6 +27,83 @@ Install all required dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## 🎯 Quick Start - Reproduce Results
+
+To reproduce the results from our trained models:
+
+1. **Download Pre-trained Models & Test Datasets:**
+   - Access the Google Drive folder: [**Download Link**](https://drive.google.com/drive/folders/1QVjFhv3Sl98__i-UWwonSMHE51mzpGw4?usp=drive_link)
+   - Access will be provided upon request
+   - Download the `best_models/` folder
+   - Download the `test_datasets/` folder
+
+2. **Setup:**
+   ```bash
+   # Place folders in your project root
+   project/
+   ├── best_models/
+   │   └── best_model.pth
+   └── test_datasets/
+       └── test_dataset.pt
+   ```
+
+3. **Load in Inference:**
+   ```python
+   # In src/emgfnd/model_inference.py
+   
+   # Load pre-trained model
+   checkpoint = torch.load("best_models/best_model.pth")
+   
+   # Load test dataset
+   dataset_test = torch.load("test_datasets/test_dataset.pt")
+   ```
+
+4. **Run Inference:**
+   ```bash
+   python src/emgfnd/model_inference.py
+   ```
+
+---
+
+## 📊 Datasets
+
+### Pre-processed Datasets (Ready to Use)
+
+The Google Drive folder contains:
+- **`best_models/`** - Pre-trained model checkpoints
+- **`test_datasets/`** - Processed test embeddings and data
+
+**Download:** [Google Drive Link](https://drive.google.com/drive/folders/1QVjFhv3Sl98__i-UWwonSMHE51mzpGw4?usp=drive_link)
+
+### Raw Datasets (Start from Scratch)
+
+If you want to process the data from scratch, download the raw datasets:
+
+#### Dataset 1: All Data Dataset
+- **Link:** [Google Drive](https://drive.google.com/file/d/0B3e3qZpPtccsMFo5bk9Ib3VCc2c/view)
+- **Citation:**
+  ```
+  Yang Yang, Lei Zheng, Jiawei Zhang, Qingcai Cui, Zhoujun Li, and Philip S. Yu. 
+  "TI-CNN: Convolutional Neural Networks for Fake News Detection." 
+  ArXiv, abs/1806.00749, 2018.
+  ```
+- **Description:** Multi-platform fake news dataset with text and image data
+
+#### Dataset 2: MediaEval 2016 (Twitter Dataset)
+- **Link:** [GitHub Repository](https://github.com/MKLab-ITI/image-verification-corpus/tree/master)
+- **Citation:**
+  ```
+  Christina Boididou, Katerina Andreadou, Symeon Papadopoulos, Duc Tien Dang Nguyen, 
+  G. Boato, Michael Riegler, Martha Larson, and Ioannis Kompatsiaris. 
+  "Verifying Multimedia Use at MediaEval 2015." 
+  MediaEval Benchmarking Initiative for Multimedia Evaluation, 2015.
+  ```
+- **Description:** Twitter image verification corpus for fake news detection
+
+> **Note:** After downloading raw datasets, follow the [Pipelines](#pipelines) section to process them.
 
 ---
 
@@ -354,9 +434,59 @@ Helper functions for model evaluation:
 - **Class Imbalance:** Training pipeline handles imbalanced datasets automatically
 - **WandB Logging:** Requires WandB account for training visualization
 - **Embeddings:** Use title-only or title+text embeddings by changing column references
+- **Quick Testing:** Use pre-trained models from `best_models/` folder and test datasets from `test_datasets/` folder for immediate inference
+
+---
+
+## 🔗 Resources
+
+- **Pre-trained Models & Test Data:** [Google Drive](https://drive.google.com/drive/folders/1QVjFhv3Sl98__i-UWwonSMHE51mzpGw4?usp=drive_link)
+- **Raw Dataset 1 (All Data):** [Google Drive](https://drive.google.com/file/d/0B3e3qZpPtccsMFo5bk9Ib3VCc2c/view)
+- **Raw Dataset 2 (MediaEval):** [GitHub](https://github.com/MKLab-ITI/image-verification-corpus/tree/master)
+
+---
+
+## 📚 References & Credits
+
+We use the following datasets in this project:
+
+### Dataset 1: All Data Dataset (TI-CNN)
+```bibtex
+@article{yang2018ticnn,
+  author    = {Yang Yang and Lei Zheng and Jiawei Zhang and 
+               Qingcai Cui and Zhoujun Li and Philip S. Yu},
+  title     = {TI-CNN: Convolutional Neural Networks for Fake News Detection},
+  journal   = {ArXiv},
+  volume    = {abs/1806.00749},
+  year      = {2018},
+  url       = {https://api.semanticscholar.org/CorpusID:46934825}
+}
+```
+
+### Dataset 2: MediaEval 2016 Image Verification Corpus
+```bibtex
+@inproceedings{boididou2015mediaeval,
+  author    = {Christina Boididou and Katerina Andreadou and 
+               Symeon Papadopoulos and Duc Tien Dang Nguyen and 
+               G. Boato and Michael Riegler and Martha Larson and 
+               Ioannis Kompatsiaris},
+  title     = {Verifying Multimedia Use at MediaEval 2015},
+  booktitle = {MediaEval Benchmarking Initiative for Multimedia Evaluation},
+  year      = {2015},
+  month     = {September}
+}
+```
+
+**Please cite these datasets if you use them in your research.**
 
 ---
 
 ## 🤝 Contributing
 
 Ensure all paths in `config.py` match your environment before running any pipeline.
+
+---
+
+## 📄 License
+
+[Add your license information here]

@@ -20,9 +20,13 @@ import torch
 from torchmetrics.classification import BinaryF1Score
 from torch_geometric.loader import DataLoader
 from torch import nn
+import emgfnd
 from emgfnd.pgat_model import PGATClassifier
-import numpy as np
+from emgfnd.graph_dataset import MultimodalGraphDataset
+import sys
+sys.modules['image_graph_prediction'] = emgfnd
 
+torch.serialization.add_safe_globals([MultimodalGraphDataset])
 
 def evaluate_model_on_test_set():
   config = Config()
@@ -31,8 +35,11 @@ def evaluate_model_on_test_set():
   print(f"Using device: {device}")
 
 
-  dataset_train, dataset_val, dataset_test = set_up_all_data_dataset()
-  # torch.save(dataset_test, "all_data_model_clip_title_final.pt")
+  dataset_train, dataset_val, dataset_test = set_up_media_eval_dataset()
+  # dataset_test = torch.load('test_datasets/all_data_clip_text_dataset_test.pt', weights_only=False)
+  torch.save(dataset_test, 'test_datasets/media_eval_clip_title_dataset_test.pt')
+
+
   dataloader_test = DataLoader(
     dataset_test,
     batch_size=config.batch_size,
@@ -54,7 +61,7 @@ def evaluate_model_on_test_set():
    
   # Load the best model
   try:
-      best_model_path = config.best_model_path
+      best_model_path = 'best_models/best_media_eval_model_clip_title.pth'
       # best_model_path ='best_models/final_all_data_model_clip_text_final.pth'
       checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
       
