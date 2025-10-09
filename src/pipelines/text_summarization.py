@@ -5,6 +5,8 @@ from transformers import BertTokenizer, BertModel
 from sklearn.metrics.pairwise import cosine_similarity
 import spacy
 from typing import List, Tuple
+import config
+import pandas as pd
 
 tokenizer = None
 model = None
@@ -263,4 +265,10 @@ def bert_extractive_summarize(text: str, max_tokens: int = 512) -> dict:
 def summarize_news_text(sample_text):
     result = bert_extractive_summarize(sample_text, max_tokens=512)
     return result['summary']
-    
+
+
+df=pd.read_csv(config.all_data_processed_path)
+df['summarized_text']= df["clean_text"].apply(summarize_news_text)
+
+
+

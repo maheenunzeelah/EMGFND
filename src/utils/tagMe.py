@@ -7,9 +7,8 @@ import logging
 import re
 from html import unescape
 from html.parser import HTMLParser
-from urllib.parse import unquote
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 import dateutil.parser
 import requests
 from PIL import Image as PILImage

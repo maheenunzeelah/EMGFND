@@ -11,9 +11,9 @@ torch.use_deterministic_algorithms(True)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 torch.set_num_threads(1)
-# 🔒 ---- End reproducibility settings ----
+# ---- End reproducibility settings ----
 
-# ✅ then the rest of your imports
+# then the rest of your imports
 from emgfnd.model_config import Config
 from emgfnd.utils import set_up_media_eval_dataset, set_up_all_data_dataset
 import torch
@@ -22,7 +22,6 @@ from torch_geometric.loader import DataLoader
 from torch import nn
 from emgfnd.pgat_model import PGATClassifier
 import numpy as np
-from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, auc
 
 
 def evaluate_model_on_test_set():
@@ -55,7 +54,7 @@ def evaluate_model_on_test_set():
    
   # Load the best model
   try:
-      best_model_path = "best_models/all_data_clip_text_model.pth"
+      best_model_path = config.best_model_path
       # best_model_path ='best_models/final_all_data_model_clip_text_final.pth'
       checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
       

@@ -5,6 +5,7 @@ image_embed_model = "clip"
 image_embed_size = 768
 IMG_PATH = "allData_images" # "allData_images"
 
+all_data_processed_path = "datasets/processed/all_data_df_processed.csv"
 all_data_path = "datasets/processed/all_data_df_resolved.csv"
 all_data_title_entities_df = "datasets/processed/all_data_df_title_entities.csv"
 all_data_text_entities_df = "datasets/processed/all_data_df_text_entities.csv"
@@ -44,6 +45,6 @@ media_eval_resnet_img_title_test_embeddings_path="src/embeddings/media_eval_resn
 media_eval_resnet_img_title_embedding_path="src/embeddings/media_eval_resnet_img_title_embeddings/image_title_embeddings.pkl"
 
 
-text_json_path_1="reference_text/all_texts_1500.json"
-text_json_path_2="reference_text/all_texts_3950.json"
-image_dir = "media_eval_reference_images" # or "reference_images" for all_data dataset
+
+# image_dir = "media_eval_reference_images" # or "all_data_reference_images" for all_data dataset
+image_dir = "all_data_reference_images"

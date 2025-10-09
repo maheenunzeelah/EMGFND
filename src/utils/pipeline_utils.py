@@ -9,7 +9,7 @@ import config
 import ast
 import os
 from PIL import Image as PILImage
-from pipelines.get_embeddings import get_embeddings
+from utils.get_embeddings import get_embeddings
 import spacy
 import pandas as pd
 from utils.image_utils import find_image_file, get_pil_image_cached
@@ -247,34 +247,9 @@ def clean_ocr_text(image, conf_threshold=90):
     
     return cleaned_text
 
-def get_batch(start_index, end_index,df):
+def get_batch(start_index, end_index, df):
     return df.iloc[start_index:end_index]
 
-def load_images_for_batch(batch_df, image_dir):
-    """
-    Loads images grouped by DataFrame index from files like node_<index>_<j>.jpg.
-    Returns a list of lists (one per row), with possibly empty lists if no images found.
-    """
-    all_img = []
-    
-    for idx in batch_df.index:
-        images = []
-        j = 0
-        while True:
-            filename = f"node_{idx}_{j}.jpg"
-            # print(f"Looking for: {filename}")
-            filepath = os.path.join(image_dir, filename)
-            if os.path.exists(filepath):
-                try:
-                    images.append(PILImage.open(filepath).convert("RGB"))
-                except Exception as e:
-                    print(f"Warning: Failed to open {filepath} — {e}")
-                j += 1
-            else:
-                break
-        all_img.append(images)  # Can be empty list if no images found
-    
-    return all_img
 
 def process_img_embeddings_batch(all_img, df, batch_df, model):
     """Optimized batch processing"""
@@ -333,7 +308,7 @@ def clean_entity_title_for_filename(entity_title):
         cleaned = cleaned.replace(char, '_')
     return cleaned
 
-def media_eval_load_images_for_batch(batch_df, image_dir):
+def load_images_for_batch(batch_df, image_dir):
     """
     Load images for each row in the batch DataFrame.
     

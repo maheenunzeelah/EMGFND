@@ -2,7 +2,7 @@
 import config
 import torch
 from torchvision import models, transforms
-from transformers import CLIPModel, CLIPProcessor
+from transformers import CLIPModel
 from PIL import Image
 
 # %%

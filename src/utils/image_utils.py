@@ -1,6 +1,6 @@
 # %%
 import re
-from IPython.display import Markdown, display, update_display, Image
+from IPython.display import display
 import base64
 import requests
 import os

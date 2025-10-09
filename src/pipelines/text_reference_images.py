@@ -2,14 +2,12 @@ import asyncio
 import aiohttp
 import time
 import config
-from utils.pipeline_utils import clean_entity_title_for_filename
-from utils.reference_images import get_batch
+from utils.pipeline_utils import clean_entity_title_for_filename, get_batch
 import utils.tagMe as tagme
 import os
 from dotenv import load_dotenv
 import spacy
 import hashlib
-import numpy as np
 import logging
 from PIL import Image as PILImage
 import io
@@ -22,7 +20,6 @@ import ast
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-IMG_PATH = "allData_images"
 
 # Global caches
 annotation_cache = {}  # Cache for TagMe API responses
