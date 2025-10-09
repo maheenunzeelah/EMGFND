@@ -1,6 +1,6 @@
 # External Multimodal Graph Based Fake News Detection
 
-A comprehensive pipeline for fake news detection using multimodal graph neural networks with entity-aware image and text embeddings.
+This is the source code for the paper "EMGFND: External Multimodal Graph Based Fake News Detection."
 
 ---
 
