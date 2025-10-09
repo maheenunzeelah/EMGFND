@@ -52,17 +52,17 @@ Load in Inference:
 
 python   # In src/emgfnd/model_inference.py
    
-   # Load pre-trained model
+   Load pre-trained model
    checkpoint = torch.load("best_models/best_model.pth")
    
-   # Load test dataset
+   Load test dataset
    dataset_test = torch.load("test_datasets/test_dataset.pt")
 
 Run Inference:
 
 bash   python src/emgfnd/model_inference.py
 
-📊 Datasets
+### 📊 Datasets
 Pre-processed Datasets (Ready to Use)
 The Google Drive folder contains:
 
