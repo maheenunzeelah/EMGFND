@@ -27,6 +27,83 @@ pip install -r requirements.txt
 
 ---
 
+🎯 Quick Start - Reproduce Results
+To reproduce the results from our trained models:
+
+Download Pre-trained Models & Test Datasets:
+
+Access the Google Drive folder: Download Link (https://drive.google.com/drive/folders/1QVjFhv3Sl98__i-UWwonSMHE51mzpGw4?usp=drive_link).
+Access will be provided upon requesting.
+
+Download the best_models/ folder
+Download the test_datasets/ folder
+
+
+Setup:
+
+bash   # Place folders in your project root
+   project/
+   ├── best_models/
+   │   └── best_model.pth
+   └── test_datasets/
+       └── test_dataset.pt
+
+Load in Inference:
+
+python   # In src/emgfnd/model_inference.py
+   
+   # Load pre-trained model
+   checkpoint = torch.load("best_models/best_model.pth")
+   
+   # Load test dataset
+   dataset_test = torch.load("test_datasets/test_dataset.pt")
+
+Run Inference:
+
+bash   python src/emgfnd/model_inference.py
+
+📊 Datasets
+Pre-processed Datasets (Ready to Use)
+The Google Drive folder contains:
+
+best_models/ - Pre-trained model checkpoints
+test_datasets/ - Processed test embeddings and data
+
+Download: Google Drive Link (Add your drive link here)
+Raw Datasets (Start from Scratch)
+If you want to process the data from scratch, download the raw datasets:
+
+All Data Dataset: https://drive.google.com/file/d/0B3e3qZpPtccsMFo5bk9Ib3VCc2c/view}
+Media Eval 2016 (Twitter) Dataset: https://github.com/MKLab-ITI/image-verification-corpus/tree/master
+
+After downloading raw datasets, follow the Pipelines section to process them.
+
+Raw Datasets (Start from Scratch)
+If you want to process the data from scratch, download the raw datasets:
+Dataset 1: All Data Dataset
+
+Link: (https://drive.google.com/file/d/0B3e3qZpPtccsMFo5bk9Ib3VCc2c/view)
+Citation:
+
+(Yang Yang, Lei Zheng, Jiawei Zhang, Qingcai Cui,
+Zhoujun Li, and Philip S. Yu. Ti-cnn: Convolu-
+tional neural networks for fake news detection. ArXiv,
+abs/1806.00749, 2018. URL https://api.semanticsc
+holar.org/CorpusID:46934825.)
+
+Dataset 2: Media Eval 2016 (Twitter Dataset)
+
+Link: (https://github.com/MKLab-ITI/image-verification-corpus/tree/master)
+Citation:
+
+Christina Boididou, Katerina Andreadou, Symeon Pa-
+padopoulos, Duc Tien Dang Nguyen, G. Boato,
+Michael Riegler, Martha Larson, and Ioannis Kompat-
+siaris. Verifying multimedia use at mediaeval 2015 in
+mediaeval benchmarking initiative for multimedia eval-
+uation. 09 2015.
+
+Note: After downloading raw datasets, follow the Pipelines section to process them.
 ## ⚙️ Configuration
 
 ### Environment Variables
