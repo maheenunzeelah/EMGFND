@@ -92,7 +92,7 @@ If you want to process the data from scratch, download the raw datasets:
   ```
 - **Description:** Multi-platform fake news dataset with text and image data
 
-#### Dataset 2: MediaEval 2016 (Twitter Dataset)
+#### Dataset 2: MediaEval 2015 (Twitter Dataset)
 - **Link:** [GitHub Repository](https://github.com/MKLab-ITI/image-verification-corpus/tree/master)
 - **Citation:**
   ```
